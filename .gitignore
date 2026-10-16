@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+.env.*
+!.env.example
+secrets/
+data/
+*.parquet
+*.jsonl.zst
+.claude/settings.local.json
