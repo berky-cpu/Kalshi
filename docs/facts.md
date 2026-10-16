@@ -66,6 +66,29 @@ Agent = primary source). Red-team independently re-fetched and confirmed the VER
   values. **O-7/O-8**: which of the 7 constituents we actually record (Gemini/Bullish/Crypto.com/LMAX may be
   missing) and USDC-vs-native-USD market mapping — UNVERIFIED, audit `data/clean` in the tracking-error study.
 
+## Venue feeds (ROADMAP 0.4)
+
+Full recorder contract: `docs/feeds.md`. Load-bearing summary (gap-detection + resync drive ROADMAP
+1.1's "gaps logged, not silent"). Red-team independently re-verified the Coinbase `sequence`, Kraken
+CRC32 checksum (incl. worked example `1063832831`), and Binance `pu` rules against primary docs.
+
+| Venue | BRTI? | Endpoint (prod) | Auth | Gap-detection field | Status |
+|---|---|---|---|---|---|
+| Coinbase Exchange `full`/`level3` | constituent | `wss://ws-direct.exchange.coinbase.com` | API key + HMAC-SHA256 (reqd since 2023-07-01) | **`sequence`** (jump > 1) | VERIFIED (`level3` resync + max-conns PARTIAL) |
+| Kraken v2 `level3` | constituent | `wss://ws-l3.kraken.com/v2` (⚠ 3-way host conflict) | REST `GetWebSocketsToken` → `token` | **`checksum`** (CRC32 top-10/side; NO seq number) | VERIFIED (host + resync PARTIAL) |
+| Bitstamp `live_orders_{pair}` | constituent | `wss://ws.bitstamp.net` (unconfirmed) | public | **`microtimestamp`** + MarketEventID (`since_id` backfill) | PARTIAL (WS v2 page Incapsula-blocked) |
+| Binance USDⓈ-M `@depth`+`@aggTrade` | lead signal | `wss://fstream.binance.com` | public | **`pu`** (`pu == prev.u`; ≠ spot's `U==prev.u+1`) | VERIFIED resync/`pu` (speeds/trades/limits PARTIAL) |
+| Bybit v5 linear `orderbook`+`publicTrade` | lead signal | `wss://stream.bybit.com/v5/public/linear` | public | **`type=="snapshot"`** reset (no numeric `u`-gap rule) | VERIFIED incl. trades |
+
+### Feed verification notes
+- We **read market data only** — Coinbase HMAC / Kraken token are used solely to subscribe; no order path in a recorder.
+- Open items (full list in `docs/feeds.md` §7): **Bitstamp** WS v2 page is Incapsula-blocked → endpoint
+  host, `bts:subscribe` envelope, snapshot reconciliation, and limits PARTIAL (schema + `order_data`
+  backfill confirmed from the reachable REST primary). **Binance** diff-depth stream speeds + U/u/pu field
+  example are from a search excerpt (SPA body unrendered) — PARTIAL; the resync/`pu` algorithm is VERIFIED.
+  **Kraken** host is a 3-way conflict (`ws-l3` / `ws-auth` / `ws`) → recorder tries all three with fallback.
+  Both Bitstamp and the Binance stream pages want a human/authenticated fetch before coding.
+
 ### Verification notes
 - Ticker-specific values (open/close examples) are from the 2026-10-18 session markets live at fetch
   time (2026-10-16); the structural facts (window, source, tick, 15-min frequency, up/down mechanic)
