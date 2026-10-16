@@ -5,10 +5,14 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
 
 ## Phase 0 — Verify the ground truth (owner: lead + quant-modeler)
 
-- [ ] **0.1 Contract terms.** From Kalshi's current KXBTC15M rulebook/contract terms, record in
+- [x] **0.1 Contract terms.** From Kalshi's current KXBTC15M rulebook/contract terms, record in
   `docs/facts.md`: settlement source (BRTI?), averaging window and sampling, how the
   strike/reference is set, open/close times, tick size, position limits.
   *Accept:* every field has a source URL + date; `pricing.py` defaults updated if any differ.
+  *Done 2026-10-16:* [facts](docs/facts.md), [ADR-001](docs/decisions/ADR-001-settlement-model.md),
+  review [REV-001](notes/reviews/REV-001-roadmap-0.1-contract-terms.md) (PASS). Window (60×1 s)
+  confirmed; contract is UP/DOWN (≥, ties→YES); strike = realized open-window average.
+  *Open:* 1 s spacing/window-endpoint is PARTIAL (inferred); position hard cap UNVERIFIED.
 - [ ] **0.2 Fees.** Pull `GET /series/KXBTC15M` (`fee_type`, `fee_multiplier`) and the latest
   fee schedule PDF. *Accept:* `fees.py` constants confirmed or corrected; test added.
 - [ ] **0.3 BRTI methodology.** From the CF Benchmarks methodology guide + constituent list:

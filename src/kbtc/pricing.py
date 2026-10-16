@@ -1,10 +1,28 @@
 """Fair value for KXBTC15M as an Asian digital on the settlement-window average.
 
 Derivation: docs/derivations/settlement-averaging.md
+Contract facts: docs/facts.md / docs/decisions/ADR-001-settlement-model.md
+
+Contract (KXBTC15M): an UP/DOWN binary, not a fixed-strike digital. It resolves YES
+iff mean(last 60 s of BRTI before CLOSE) >= mean(60 s of BRTI before OPEN), with ties
+(equality under the "at least" rule) resolving YES. Settlement uses CF Benchmarks'
+Bitcoin Real-Time Index (BRTI), a once-per-second index; the settlement value is the
+simple average of the 60 one-second prints in the final minute, rounded to the nearest
+$0.01 (VERIFIED 2026-10-16, see docs/facts.md / ADR-001).
+
+Here `strike` is the open-window 60 s average, fixed (realized, in the past) at market
+open — so there is no look-ahead. It is known for the ~14 min of trading after the first
+60 s, but we observe it only through our BRTI *replica*: the strike we price against is
+our estimate of the official open-window average, with error bounded by replica tracking
+error (Phase 2), not zero. Limitation: during the opening 60 s the reference is still
+forming (both endpoints random); this model assumes the strike is already realized and
+prices only the closing-window average against it.
 
 Model: log price X follows dX = sigma dW over the contract's life (drift dropped).
-Settlement A = mean of n samples spaced `spacing_s` apart, the last at expiry T
-(UNVERIFIED: 60 one-second BRTI prints — confirm in ROADMAP 0.1).
+Settlement A = mean of n samples spaced `spacing_s` apart, the last at expiry T.
+n=60 is VERIFIED 2026-10-16 ("60 RTI prices are collected"); the 1 s spacing and the
+exact window endpoint are INFERRED from "BRTI is a 1 Hz index" (PARTIAL — see
+docs/facts.md / ADR-001). The near-expiry variance correction depends on this placement.
 Units: tau in seconds, sigma in log-return per sqrt(second).
 """
 from __future__ import annotations
@@ -17,8 +35,8 @@ SECONDS_PER_YEAR = 365.0 * 24 * 3600
 
 @dataclass(frozen=True)
 class SettlementWindow:
-    n_samples: int = 60  # UNVERIFIED
-    spacing_s: float = 1.0  # UNVERIFIED
+    n_samples: int = 60  # VERIFIED 2026-10-16, see docs/facts.md / ADR-001
+    spacing_s: float = 1.0  # VERIFIED 2026-10-16, see docs/facts.md / ADR-001
 
     @property
     def length_s(self) -> float:
@@ -102,14 +120,24 @@ def digital_up(
     n_observed: int = 0,
     window: SettlementWindow = DEFAULT_WINDOW,
 ) -> DigitalValue:
-    """P(settlement average > strike) and its sensitivity to log spot."""
+    """P(settlement average >= strike) and its sensitivity to log spot.
+
+    Uses the verified "at least" (>=) rule: equality resolves YES (ties -> YES).
+    The continuous branch below is unchanged because P(A >= K) = P(A > K) for the
+    continuous settlement average, so the tie convention has zero fair-value impact
+    except at the realized at-expiry equality boundary. In reality exact ties arise
+    only from the $0.01 penny-rounding of both averages (not modeled here); the ">="
+    rule simply assigns that measure-zero / rounding mass to YES, as verified.
+    """
     if spot <= 0 or strike <= 0:
         raise ValueError("spot and strike must be positive")
     mom = settlement_moments(math.log(spot), tau_s, sigma, observed_log_sum, n_observed, window)
     gap = mom.mean - math.log(strike)
     if mom.var <= 0.0:
-        p = 1.0 if gap > 0 else (0.0 if gap < 0 else 0.5)
-        return DigitalValue(prob_up=p, delta_x=0.0, z=math.copysign(math.inf, gap) if gap else 0.0)
+        # Degenerate (settlement fully realized): equality resolves YES under ">=".
+        # z is +inf at a tie to stay consistent with prob_up=1.0 (not a 50/50 signal).
+        p = 1.0 if gap >= 0 else 0.0
+        return DigitalValue(prob_up=p, delta_x=0.0, z=math.copysign(math.inf, 1.0 if gap >= 0 else -1.0))
     sd = math.sqrt(mom.var)
     z = gap / sd
     return DigitalValue(prob_up=_Phi(z), delta_x=_phi(z) * mom.weight_on_spot / sd, z=z)
