@@ -15,6 +15,27 @@ FINE = SettlementWindow(n_samples=6000, spacing_s=0.01)  # ~continuous 60 s wind
 W = 60.0
 
 
+def test_verified_window_defaults():
+    # VERIFIED 2026-10-16 (docs/facts.md / ADR-001): 60 one-second BRTI prints.
+    w = SettlementWindow()
+    assert w.n_samples == 60
+    assert w.spacing_s == 1.0
+    assert w.length_s == 60.0
+
+
+def test_tie_resolves_yes_at_expiry():
+    # ">=" rule: expected settlement average EXACTLY equal to strike resolves YES.
+    strike = 60_000.0
+    n = 60
+    exact = n * math.log(strike)  # mean == log(strike) -> gap == 0, var == 0
+    at = digital_up(strike, strike, 0.0, SIG, observed_log_sum=exact, n_observed=n)
+    assert at.prob_up == 1.0
+    # Just below the strike resolves NO.
+    below = math.exp(exact / n) * (1 - 1e-6)
+    just_below = digital_up(below, strike, 0.0, SIG, observed_log_sum=n * math.log(below), n_observed=n)
+    assert just_below.prob_up == 0.0
+
+
 def test_before_window_matches_continuous_limit():
     tau = 900.0
     mom = settlement_moments(0.0, tau, SIG, window=FINE)
