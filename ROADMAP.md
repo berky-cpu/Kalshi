@@ -20,10 +20,17 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   `fee_multiplier=1` → taker 0.07, maker-free; constants unchanged, `effective_taker_rate` added.
   *Open:* 0.07/0.0175 coefficients, round-up/per-order, maker-free are PARTIAL (single-source
   corroboration; Kalshi fee PDF 429'd) — needs a human/authenticated PDF fetch to reach primary.
-- [ ] **0.3 BRTI methodology.** From the CF Benchmarks methodology guide + constituent list:
+- [x] **0.3 BRTI methodology.** From the CF Benchmarks methodology guide + constituent list:
   constituents, publication cadence (1 s vs 200 ms), aggregation steps (order-book
   mid/“price-volume curve”, spacing, deviation filters, weighting).
   *Accept:* written spec in `docs/brti-spec.md` precise enough to implement.
+  *Done 2026-10-16:* [brti-spec](docs/brti-spec.md), [facts](docs/facts.md), review
+  [REV-003](notes/reviews/REV-003-roadmap-0.3-brti-spec.md) (PASS, Round 2). Methodology v17.0;
+  7 constituents (itBit suspended 27-Jul-2026); 200 ms internal / 1 Hz top-of-second standard feed;
+  full aggregation math transcribed and independently re-verified by red-team.
+  *Open (→ Phase 2, empirical):* λ=10.3/v_T operator (O-2, top priority) and cap mean trimmed-vs-
+  winsorized (O-4) feed every print; settlement-window endpoint (O-5) + which feed cadence (O-6);
+  recorder coverage of the 7 constituents + USDC mapping (O-7/O-8).
 - [ ] **0.4 Feed specs.** For Coinbase `level3`/`full`, Kraken v2 `level3`, Bitstamp
   `live_orders`, Binance/Bybit perp: endpoint, auth, subscription message, sequence
   numbers, snapshot/resync procedure, rate limits. *Accept:* `docs/feeds.md`.
