@@ -31,9 +31,15 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   *Open (→ Phase 2, empirical):* λ=10.3/v_T operator (O-2, top priority) and cap mean trimmed-vs-
   winsorized (O-4) feed every print; settlement-window endpoint (O-5) + which feed cadence (O-6);
   recorder coverage of the 7 constituents + USDC mapping (O-7/O-8).
-- [ ] **0.4 Feed specs.** For Coinbase `level3`/`full`, Kraken v2 `level3`, Bitstamp
+- [x] **0.4 Feed specs.** For Coinbase `level3`/`full`, Kraken v2 `level3`, Bitstamp
   `live_orders`, Binance/Bybit perp: endpoint, auth, subscription message, sequence
   numbers, snapshot/resync procedure, rate limits. *Accept:* `docs/feeds.md`.
+  *Done 2026-10-16:* [feeds](docs/feeds.md), [facts](docs/facts.md), review
+  [REV-004](notes/reviews/REV-004-roadmap-0.4-feeds.md) (PASS). Gap-detection re-verified vs primary:
+  Coinbase `sequence`, Kraken CRC32 checksum, Binance `pu` (≠ spot), Bybit snapshot-reset.
+  *Open (→ Phase 1.1):* Bitstamp WS v2 page Incapsula-blocked (host/envelope/limits PARTIAL);
+  Binance diff-depth speeds + aggTrade/limits PARTIAL (SPA unrendered); Kraken 3-way host conflict;
+  Coinbase `level3` resync inferred. **Phase 0 complete.**
 
 ## Phase 1 — Record everything (owner: data-engineer)
 
