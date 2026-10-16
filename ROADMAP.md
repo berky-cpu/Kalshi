@@ -13,8 +13,13 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   review [REV-001](notes/reviews/REV-001-roadmap-0.1-contract-terms.md) (PASS). Window (60×1 s)
   confirmed; contract is UP/DOWN (≥, ties→YES); strike = realized open-window average.
   *Open:* 1 s spacing/window-endpoint is PARTIAL (inferred); position hard cap UNVERIFIED.
-- [ ] **0.2 Fees.** Pull `GET /series/KXBTC15M` (`fee_type`, `fee_multiplier`) and the latest
+- [x] **0.2 Fees.** Pull `GET /series/KXBTC15M` (`fee_type`, `fee_multiplier`) and the latest
   fee schedule PDF. *Accept:* `fees.py` constants confirmed or corrected; test added.
+  *Done 2026-10-16:* [facts](docs/facts.md), review [REV-002](notes/reviews/REV-002-roadmap-0.2-fees.md)
+  (PASS), note [fee-curve](docs/derivations/fee-curve.md). API primary-verified `fee_type="quadratic"`,
+  `fee_multiplier=1` → taker 0.07, maker-free; constants unchanged, `effective_taker_rate` added.
+  *Open:* 0.07/0.0175 coefficients, round-up/per-order, maker-free are PARTIAL (single-source
+  corroboration; Kalshi fee PDF 429'd) — needs a human/authenticated PDF fetch to reach primary.
 - [ ] **0.3 BRTI methodology.** From the CF Benchmarks methodology guide + constituent list:
   constituents, publication cadence (1 s vs 200 ms), aggregation steps (order-book
   mid/“price-volume curve”, spacing, deviation filters, weighting).
