@@ -1,0 +1,31 @@
+# Daily off-site backup of the raw-data tree via rclone (ROADMAP 1.3). Oneshot, triggered by the
+# matching .timer. Exits non-zero on sync OR verification failure so OnFailure can alert.
+[Unit]
+Description=kbtc daily raw-data backup (rclone)
+After=network-online.target
+Wants=network-online.target
+# OnFailure=kbtc-alert@%n.service   # wire an alert handler here
+
+[Service]
+Type=oneshot
+User=kbtc
+Group=kbtc
+WorkingDirectory=/opt/kbtc
+# KBTC_BACKUP_REMOTE (e.g. b2:bucket/kbtc, r2:bucket/kbtc, s3:bucket/kbtc) and the rclone remote
+# credentials live in the environment / rclone config on the box only, never in the repo.
+EnvironmentFile=/etc/kbtc/env
+# rclone config lives under /etc/kbtc (readable with ProtectHome=true, unlike ~/.config/rclone).
+Environment=RCLONE_CONFIG=/etc/kbtc/rclone.conf
+ExecStart=/opt/kbtc/deploy/backup.sh
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kbtc-backup
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+RestrictAddressFamilies=AF_INET AF_INET6
+# Reads the data tree; rclone needs its config dir under the kbtc user's home.
+ReadOnlyPaths=/opt/kbtc/data

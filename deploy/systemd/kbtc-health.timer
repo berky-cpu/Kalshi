@@ -1,0 +1,12 @@
+# Run the health report every 15 minutes.
+[Unit]
+Description=Run kbtc recorder health report every 15 minutes
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=false
+RandomizedDelaySec=20
+AccuracySec=15
+
+[Install]
+WantedBy=timers.target

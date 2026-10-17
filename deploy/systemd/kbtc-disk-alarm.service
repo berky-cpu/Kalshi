@@ -1,0 +1,22 @@
+# Data-partition disk-usage alarm. Exits 1 (warn) / 2 (critical) on breach -> unit failed ->
+# OnFailure alert. A full disk silently drops recorded data, so this runs frequently.
+[Unit]
+Description=kbtc data-partition disk-usage alarm
+# OnFailure=kbtc-alert@%n.service   # wire an alert handler here
+
+[Service]
+Type=oneshot
+User=kbtc
+Group=kbtc
+WorkingDirectory=/opt/kbtc
+ExecStart=/opt/kbtc/.venv/bin/python -m kbtc.recorders.disk_alarm --path /opt/kbtc/data --warn-pct 0.80 --crit-pct 0.90 --min-free-gib 5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kbtc-disk-alarm
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadOnlyPaths=/opt/kbtc/data

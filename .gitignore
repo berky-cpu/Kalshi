@@ -11,6 +11,15 @@ data/
 *.jsonl.zst
 .claude/settings.local.json
 
+# Deploy secrets: real VPS secrets live in /etc/kbtc (outside the repo). These patterns are
+# belt-and-suspenders in case anything secret is ever created inside the tree. The committed
+# TEMPLATE deploy/env.example (no leading dot, not named .env.*) stays tracked.
+*.pem
+*.key
+rclone.conf
+deploy/env
+!deploy/env.example
+
 # Test fixtures are committed sample recordings; keep them tracked even though they live under a
 # data/ path and are *.jsonl.zst (both ignored above). Order matters: these negations come last.
 !tests/fixtures/**/
