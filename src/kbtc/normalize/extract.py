@@ -199,7 +199,9 @@ def _kalshi_trades(msg: Any, channel: str) -> list[dict]:
     Payload UNVERIFIED (ROADMAP 1.1b) — normalized as recorded."""
     if not isinstance(msg, dict) or msg.get("type") != "trade":
         return []
-    body = msg.get("msg", {}) or {}
+    # Robust to the UNVERIFIED Kalshi msg-wrapper (1.1b): payload may be nested or FLAT.
+    inner = msg.get("msg")
+    body = inner if isinstance(inner, dict) else msg
     price = body.get("yes_price")
     if price is None:
         price = body.get("price")

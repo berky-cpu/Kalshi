@@ -312,7 +312,10 @@ def stream_kalshi(channel: str, records: Iterable[Record]) -> Iterator[tuple[str
         typ = msg.get("type") if isinstance(msg, dict) else None
         if typ not in {"orderbook_snapshot", "orderbook_delta"}:
             continue
-        ticker = (msg.get("msg", {}) or {}).get("market_ticker", proc.product)
+        # Robust to the UNVERIFIED msg-wrapper (1.1b): fields may be nested under ``msg`` or FLAT.
+        inner = msg.get("msg") if isinstance(msg, dict) else None
+        body = inner if isinstance(inner, dict) else (msg if isinstance(msg, dict) else {})
+        ticker = body.get("market_ticker", proc.product)
         if typ == "orderbook_snapshot":
             baseline[ticker] = True
             pending[ticker] = False

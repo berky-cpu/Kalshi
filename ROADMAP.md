@@ -69,6 +69,17 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   it in the live run, add **sid-pruning** (on a resync `orderbook_snapshot`, restrict deltas/trades to the
   snapshot's sid) OR reconnect-based resync, with a test that an old-sid delta after the fresh snapshot
   leaves the book unchanged.
+  *Schema fixed + VERIFIED on the live wire 2026-10-17:* the adapter had GUESSED field names
+  (`price`/`delta`/`yes`/`no`) and would not have parsed real frames; rewritten to the official schema
+  (`yes_dollars_fp`/`no_dollars_fp` `[price_dollars,count_fp]` pairs; delta `price_dollars` + SIGNED
+  `delta_fp`; dollar-string prices, Decimal). An authed capture from the box (Berk provisioned a read-only
+  Kalshi key) **confirms on the wire**: payload NESTED under `msg`, `seq` per-sid resetting to 1 per
+  reconnect (handled — each snapshot re-anchors), ~40k-level snapshots. Review
+  [REV-017](notes/reviews/REV-017-roadmap-1.1b-kalshi-orderbook-schema.md) (PASS, provisional). **257 tests.**
+  **NOT closed — two blockers remain:** (1) **keepalive** — the capture showed the Kalshi WS dropping ~every
+  4 s (`ping_interval_s=None`, no ping); the 24/7 book recorder must not be enabled until Kalshi's WS
+  keepalive is added + the close reason confirmed; (2) `trade` payload units + unsubscribe-`sids` envelope
+  still UNVERIFIED. Box has Kalshi creds now (key in `/etc/kbtc/env`, PEM `640 root:kbtc`).
 - [x] **1.2** Settlement capture: record every KXBTC15M market's final result and settlement value.
   *Done 2026-10-16:* `src/kbtc/recorders/settlement.py` + tests (78 pass). Review
   [REV-006](notes/reviews/REV-006-roadmap-1.2-settlement.md) (FAIL→PASS, Round 2). Kalshi REST

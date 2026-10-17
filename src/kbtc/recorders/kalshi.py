@@ -15,25 +15,34 @@ VERIFICATION (primary, docs.kalshi.com, read 2026-10-16):
   ``KALSHI-ACCESS-SIGNATURE``, ``KALSHI-ACCESS-TIMESTAMP`` (unix ms). Signature = sign of
   ``timestamp + "GET" + "/trade-api/ws/v2"`` with the private key (RSA-PSS/SHA-256 for RSA, or
   Ed25519), base64-encoded. Even public channels require an authenticated session; we read only.
-* Frame shape (VERIFIED, margin-ws orderbook schema): ``{"type", "sid", "seq", "msg": {...}}``
-  where ``sid`` = server-generated subscription identifier and ``seq`` = "Sequential number that
-  should be checked if you want to guarantee you received all the messages."
+* Orderbook WS schema (VERIFIED, docs.kalshi.com/websockets/orderbook-updates, read 2026-10-17):
+  Envelope top-level ``type`` ("orderbook_snapshot" | "orderbook_delta"), ``sid`` (int, required),
+  ``seq`` (int, required — "Sequential number that should be checked"), optional ``id``,
+  ``sending_ts_ms``.
+  - **orderbook_snapshot**: ``market_ticker`` (str), ``market_id`` (str UUID),
+    ``yes_dollars_fp`` (OPTIONAL array — absent if no yes offers), ``no_dollars_fp`` (OPTIONAL).
+    Each level is a 2-item array of STRINGS ``[price_in_dollars, count_fp]`` e.g.
+    ``["0.0800","300.00"]`` — price is a DOLLAR string, size a fixed-point count string.
+  - **orderbook_delta**: ``market_ticker`` (str), ``market_id`` (str), ``price_dollars`` (str,
+    dollars), ``delta_fp`` (str, SIGNED fixed-point contract delta, 2 decimals — e.g. "-54.00",
+    a signed change to resting size at that price/side), ``side`` ("yes" | "no"), optional
+    ``client_order_id``, ``ts`` (deprecated RFC3339), ``ts_ms`` (int), ``subaccount``.
 
-UNVERIFIED (could NOT confirm from the official main event-markets WS reference this session —
-the `/websockets` reference page and `getting_started/websocket_connection` 404'd / were not
-captured; see report. Treat the following as PARTIAL until the lead closes them):
-* The orderbook_snapshot PAYLOAD for KXBTC15M event markets. The margin/perps schema uses
-  ``msg.bid`` / ``msg.ask`` arrays of ``[price, count]`` strings; a secondary client wrapper
-  reports the event-markets snapshot uses ``yes`` / ``no`` arrays. We therefore accept BOTH side
-  vocabularies below, but which one KXBTC15M emits is UNVERIFIED.
-* ``orderbook_delta`` payload: fields ``market_ticker``, ``price``, ``delta``, ``side`` are
-  VERIFIED in the margin schema with ``side`` ∈ {``bid``,``ask``} as STRINGS; for event markets
-  the ``yes``/``no`` side tokens and whether price is cents-int vs dollars-string are UNVERIFIED.
-* SEQ GAP SEMANTICS: the docs say seq "should be checked"; they do NOT state it is per-sid or
-  strictly +1. The +1-per-sid gap rule below is a reasonable inference, flagged UNVERIFIED.
+UNVERIFIED — need a LIVE capture to close (Kalshi WS requires auth; the box has no Kalshi creds
+yet — flagged to Berk):
+* ``msg`` WRAPPER AMBIGUITY. The margin-ws schema nests the payload under ``msg``
+  (``{"type","sid","seq","msg":{...}}``); the official event-markets orderbook-updates example
+  shows the payload fields FLAT (top-level). We parse ROBUSTLY to BOTH (look under ``msg`` if
+  present, else top-level) via :func:`_event_body`. Which one KXBTC15M actually emits is
+  UNVERIFIED until a real frame is captured.
+* SEQ SCOPE + RESET. The doc says ``seq`` "should be checked" but does NOT state per-sid vs
+  shared-across-subscription scope, nor reset-on-reconnect behaviour. A community source (dev.to)
+  reports ``seq`` is shared across the whole subscription and a gap should resubscribe the whole
+  subscription (which matches our in-band resync). We keep per-sid +1 tracking below; scope and
+  reset semantics remain UNVERIFIED pending a live capture.
 
-So prices/sizes are coerced tolerantly (int cents OR decimal-dollar strings) and both side
-vocabularies are accepted.
+Prices are DOLLAR strings and sizes fixed-point count strings, both parsed to exact ``Decimal``
+(never float).
 """
 from __future__ import annotations
 
@@ -50,22 +59,27 @@ ENDPOINT_DEMO = "wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2"  # VERIFI
 WS_SIGN_PATH = "/trade-api/ws/v2"  # path signed for the handshake (VERIFIED)
 
 _LIFECYCLE = {"market_lifecycle", "market_lifecycle_v2", "market_lifecycle_update"}
-# Side keys accepted on the book (event-markets yes/no UNVERIFIED; perps bid/ask VERIFIED).
-_SIDE_KEYS = ("yes", "no", "bid", "ask")
+# Snapshot side arrays → internal book side label (VERIFIED field names).
+_SNAPSHOT_SIDES = (("yes_dollars_fp", "yes"), ("no_dollars_fp", "no"))
 
 
-def _num(x: Any) -> Any:
-    """Coerce a price/size that may be an int, a cents-int string, or a dollar string."""
-    if isinstance(x, (int,)):
+def _event_body(msg: dict) -> dict:
+    """Return the event payload fields. Robust to the UNVERIFIED ``msg``-wrapper ambiguity: use
+    ``msg["msg"]`` if a dict is nested there (margin-ws style), else the top-level object itself
+    (the official event-markets orderbook-updates example shows fields FLAT). A live capture must
+    confirm which KXBTC15M emits (1.1b)."""
+    inner = msg.get("msg")
+    return inner if isinstance(inner, dict) else msg
+
+
+def _dec(x: Any) -> Decimal:
+    """Parse a dollar/fixed-point STRING (or number) to exact Decimal (never float)."""
+    if isinstance(x, Decimal):
         return x
-    s = str(x)
     try:
-        return int(s)
-    except ValueError:
-        try:
-            return Decimal(s)
-        except InvalidOperation:
-            return s
+        return Decimal(str(x))
+    except (InvalidOperation, ValueError, TypeError):  # pragma: no cover - defensive
+        raise ValueError(f"not a numeric Kalshi value: {x!r}") from None
 
 
 class KalshiProcessor(MessageProcessor):
@@ -121,7 +135,7 @@ class KalshiProcessor(MessageProcessor):
             return []
         typ = msg.get("type")
         sid, seq = msg.get("sid"), msg.get("seq")
-        body = msg.get("msg", {})
+        body = _event_body(msg)
 
         # After a resubscribe, suppress everything until the fresh orderbook_snapshot lands: this
         # drops any trailing frames from the OLD subscription (so no double-apply) and prevents
@@ -158,24 +172,29 @@ class KalshiProcessor(MessageProcessor):
         return []  # subscribed/ok/error control frames
 
     def _apply_snapshot_body(self, body: dict) -> None:
+        """Rebuild the book from the VERIFIED snapshot: ``yes_dollars_fp``/``no_dollars_fp`` (both
+        OPTIONAL), each a list of ``[price_dollars_str, count_fp_str]``. Prices/sizes → exact
+        Decimal (dollars / fixed-point counts)."""
         ticker = body.get("market_ticker", self.product)
         book: dict[str, dict[Any, Any]] = {}
-        for side in _SIDE_KEYS:
-            rows = body.get(side)
+        for key, label in _SNAPSHOT_SIDES:
+            rows = body.get(key)
             if not rows:
-                continue
-            book.setdefault(side, {})
-            for price, size in rows:
-                book[side][_num(price)] = _num(size)
+                continue  # OPTIONAL side: absent when there are no offers on it
+            level = book.setdefault(label, {})
+            for price_dollars, count_fp in rows:
+                level[_dec(price_dollars)] = _dec(count_fp)
         self.books[ticker] = book
 
     def _apply_delta(self, body: dict) -> None:
+        """Apply a VERIFIED delta: SIGNED ``delta_fp`` change to the resting size at
+        ``(side, price_dollars)``; drop the level if it reaches <= 0."""
         ticker = body.get("market_ticker", self.product)
         book = self.book_for(ticker)
-        side = body["side"]
+        side = body["side"]  # "yes" | "no"
         level = book.setdefault(side, {})
-        price = _num(body["price"])
-        new = level.get(price, 0) + _num(body["delta"])
+        price = _dec(body["price_dollars"])
+        new = level.get(price, Decimal(0)) + _dec(body["delta_fp"])
         if new <= 0:
             level.pop(price, None)
         else:

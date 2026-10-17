@@ -1,13 +1,14 @@
+from decimal import Decimal
+
 from conftest import load_fixture
 
 from kbtc.recorders.kalshi import KalshiProcessor
 
-# NOTE: the Kalshi fixture is SYNTHETIC and its schema is UNVERIFIED. ROADMAP 0.4 did not
-# cover Kalshi's WS feed; endpoints/auth/subscribe/frame-shape are verified (docs.kalshi.com),
-# but the KXBTC15M event-market payload schema (yes/no vs bid/ask, cents-int vs dollar-string)
-# and the +1-per-sid seq semantics are NOT confirmed (the /websockets reference was unreachable
-# on 2026-10-16). A green test here proves adapter internal consistency, NOT feed validation.
-# Resolved by the Kalshi follow-up item (ROADMAP 1.1b) once /websockets is reachable.
+# The orderbook WS schema is VERIFIED (docs.kalshi.com/websockets/orderbook-updates, 2026-10-17):
+# envelope type/sid/seq; snapshot yes_dollars_fp/no_dollars_fp (optional [price_dollars,count_fp]
+# string pairs); delta price_dollars + SIGNED delta_fp + side yes/no. STILL UNVERIFIED pending a
+# live capture (Kalshi WS needs auth; box has no creds): the ``msg``-wrapper (flat vs nested) and
+# the seq scope/reset semantics — the adapter parses robustly to both wrapper shapes.
 
 
 def test_orderbook_delta_trade_lifecycle_and_seeded_seq_gap():
@@ -18,9 +19,11 @@ def test_orderbook_delta_trade_lifecycle_and_seeded_seq_gap():
         p.process(m, ts + i)
 
     book = p.book_for("KXBTC15M-26OCT16")
-    # snapshot yes{40:100,41:250} no{58:120}; +50 on yes40 -> 150; -250 removes yes41.
-    assert book["yes"] == {40: 150}
-    assert 41 not in book["yes"]
+    # snapshot yes{0.40:100, 0.41:250} no{0.58:120}; +50 on yes 0.40 -> 150; -250 removes yes 0.41.
+    assert book["yes"] == {Decimal("0.40"): Decimal("150.00")}
+    assert Decimal("0.41") not in book["yes"]
+    # no side stays 120: the seq-5 'no' delta is dropped by the seq gap below (never silently applied).
+    assert book["no"] == {Decimal("0.58"): Decimal("120.00")}
     # The trade (sid 9) and lifecycle were recorded.
     assert p.trades and p.trades[0]["count"] == 5
     assert p.lifecycle and p.lifecycle[0]["status"] == "active"
@@ -38,4 +41,45 @@ def test_snapshot_rebaselines_seq_and_rebuilds():
     # Apply the fresh snapshot as a resync; the seq baseline resets and the flag clears.
     p.apply_snapshot(msgs[0], 1)
     assert p.needs_resnapshot is False
-    assert p.book_for("KXBTC15M-26OCT16")["no"] == {58: 120}
+    assert p.book_for("KXBTC15M-26OCT16")["no"] == {Decimal("0.58"): Decimal("120.00")}
+
+
+def test_signed_delta_to_zero_removes_level():
+    """A SIGNED delta_fp that brings a level to <= 0 drops it (never a negative resting size)."""
+    p = KalshiProcessor(product="T")
+    p.process({"type": "orderbook_snapshot", "sid": 1, "seq": 1, "market_ticker": "T",
+               "yes_dollars_fp": [["0.30", "75.00"]]}, 1)
+    assert p.book_for("T")["yes"] == {Decimal("0.30"): Decimal("75.00")}
+    # +25 then -100 (signed) -> 0 -> removed.
+    p.process({"type": "orderbook_delta", "sid": 1, "seq": 2, "market_ticker": "T",
+               "price_dollars": "0.30", "delta_fp": "25.00", "side": "yes"}, 2)
+    assert p.book_for("T")["yes"] == {Decimal("0.30"): Decimal("100.00")}
+    p.process({"type": "orderbook_delta", "sid": 1, "seq": 3, "market_ticker": "T",
+               "price_dollars": "0.30", "delta_fp": "-100.00", "side": "yes"}, 3)
+    assert Decimal("0.30") not in p.book_for("T")["yes"]
+
+
+def test_robust_to_msg_wrapper_and_flat_payload():
+    """UNVERIFIED msg-wrapper (1.1b): the adapter must parse BOTH the FLAT payload (official event-
+    markets example) and the margin-ws ``msg``-nested payload to the SAME book."""
+    flat = {"type": "orderbook_snapshot", "sid": 1, "seq": 1, "market_ticker": "T",
+            "yes_dollars_fp": [["0.08", "300.00"]], "no_dollars_fp": [["0.92", "10.00"]]}
+    nested = {"type": "orderbook_snapshot", "sid": 2, "seq": 1,
+              "msg": {"market_ticker": "T", "yes_dollars_fp": [["0.08", "300.00"]],
+                      "no_dollars_fp": [["0.92", "10.00"]]}}
+    pf = KalshiProcessor(product="T"); pf.process(flat, 1)
+    pn = KalshiProcessor(product="T"); pn.process(nested, 1)
+    expected = {"yes": {Decimal("0.08"): Decimal("300.00")},
+                "no": {Decimal("0.92"): Decimal("10.00")}}
+    assert pf.book_for("T") == expected
+    assert pn.book_for("T") == expected
+
+
+def test_snapshot_optional_sides_absent():
+    """yes_dollars_fp / no_dollars_fp are OPTIONAL (absent when a side has no offers)."""
+    p = KalshiProcessor(product="T")
+    p.process({"type": "orderbook_snapshot", "sid": 1, "seq": 1, "market_ticker": "T",
+               "no_dollars_fp": [["0.95", "5.00"]]}, 1)  # no yes side at all
+    book = p.book_for("T")
+    assert "yes" not in book
+    assert book["no"] == {Decimal("0.95"): Decimal("5.00")}

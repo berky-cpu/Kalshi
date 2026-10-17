@@ -79,7 +79,7 @@ CRC32 checksum (incl. worked example `1063832831`), and Binance `pu` rules again
 | Bitstamp `live_orders_{pair}` | constituent | `wss://ws.bitstamp.net` ✓ | public | **`event_id`/`pre_event_id` chain** (`pre_event_id` == prev `event_id`, like Binance `pu`); `since_id` REST backfill | VERIFIED 2026-10-16 (primary WS doc, human fetch) |
 | Binance USDⓈ-M `@depth`+`@aggTrade` | lead signal | `wss://fstream.binance.com` | public | **`pu`** (`pu == prev.u`; ≠ spot's `U==prev.u+1`) | VERIFIED resync/`pu` (speeds/trades/limits PARTIAL) |
 | Bybit v5 linear `orderbook`+`publicTrade` | lead signal | `wss://stream.bybit.com/v5/public/linear` | public | **`type=="snapshot"`** reset (no numeric `u`-gap rule) | VERIFIED incl. trades |
-| Kalshi `orderbook_delta`/`trade`/lifecycle | **trading venue** | `wss://external-api-ws.kalshi.com/trade-api/ws/v2` (legacy `api.elections.kalshi.com`; demo `external-api-ws.demo.kalshi.co`) — all VERIFIED | API key + RSA-PSS/Ed25519 sig over `ts+"GET"+"/trade-api/ws/v2"`, headers `KALSHI-ACCESS-KEY/SIGNATURE/TIMESTAMP` (ms) — READS ONLY, VERIFIED | subscribe `{id,cmd,params:{channels,market_tickers}}`, unsubscribe via `sids` (VERIFIED); orderbook msg schema + seq gap rule still UNVERIFIED | **PARTIAL** — endpoints/auth/subscribe/sids/msg-types VERIFIED (quick-start WS PDF, human fetch); orderbook payload schema + seq semantics need the channel-reference page (1.1b) |
+| Kalshi `orderbook_delta`/`trade`/lifecycle | **trading venue** | `wss://external-api-ws.kalshi.com/trade-api/ws/v2` (legacy `api.elections.kalshi.com`; demo `external-api-ws.demo.kalshi.co`) — all VERIFIED | API key + RSA-PSS/Ed25519 sig over `ts+"GET"+"/trade-api/ws/v2"`, headers `KALSHI-ACCESS-KEY/SIGNATURE/TIMESTAMP` (ms) — READS ONLY, VERIFIED | **orderbook SCHEMA now VERIFIED** (2026-10-17): envelope `type`/`sid`/`seq`; snapshot `yes_dollars_fp`/`no_dollars_fp` (optional `[price_dollars,count_fp]` string pairs); delta `price_dollars`+SIGNED `delta_fp`+`side` yes/no. **LIVE-WIRE CONFIRMED 2026-10-17** (authed capture, KXBTC15M-26OCT172000-00): payload IS NESTED under `msg` (the doc example was flattened); `sid` per-subscription, `seq` per-sid and **RESETS to 1 on each reconnect** (handled — each `orderbook_snapshot` re-anchors `_seq_by_sid`). Real snapshot = 40k-ish levels, dollar-string prices ("0.0010") + fixed-point sizes ("1226720.00"); delta `delta_fp="-100.00"` signed. **unsubscribe-via-`sids` still INFERRED (code marks it UNVERIFIED).** | **orderbook schema VERIFIED (doc + live wire 2026-10-17)**; `trade` payload units still UNVERIFIED (no trade in the capture window). **Pre-deploy blocker (NEW):** the recorder sends NO keepalive (`ping_interval_s=None`) and the Kalshi WS drops the connection ~every 4 s → constant reconnect; must add Kalshi's WS keepalive before the 24/7 book recorder is enabled |
 
 ### Feed verification notes
 - We **read market data only** — Coinbase HMAC / Kraken token are used solely to subscribe; no order path in a recorder.
@@ -113,10 +113,23 @@ CRC32 checksum (incl. worked example `1063832831`), and Binance `pu` rules again
 - **Kalshi WS** (1.1b): VERIFIED from the quick-start WS PDF (human fetch) — prod/legacy/demo endpoints, auth
   headers + signing string `ts+"GET"+"/trade-api/ws/v2"`, subscribe `{id,cmd,params:{channels,market_tickers}}`,
   unsubscribe via `sids`, message types (`orderbook_snapshot`/`orderbook_delta`/`ticker`/`trade`/`market_lifecycle_v2`/
-  `error`), reconnect-with-backoff, auto keep-alive. Ticker uses `_dollars` string fields. **Still UNVERIFIED:** the
-  exact `orderbook_delta`/`orderbook_snapshot` payload schema (yes/no vs bid/ask; price format) and the seq gap
-  semantics (the quick-start shows no top-level `seq`) — these need the dedicated **channel-reference** page, not the
-  quick-start. 1.1b remains open on that page.
+  `error`), reconnect-with-backoff, auto keep-alive. Ticker uses `_dollars` string fields.
+- **Kalshi ORDERBOOK SCHEMA VERIFIED 2026-10-17** (`https://docs.kalshi.com/websockets/orderbook-updates`, read
+  2026-10-17): envelope top-level `type` (`orderbook_snapshot`|`orderbook_delta`), `sid` (int, required), `seq`
+  (int, required — "Sequential number that should be checked"), optional `id`, `sending_ts_ms`.
+  **orderbook_snapshot:** `market_ticker` (str), `market_id` (str UUID), **`yes_dollars_fp`** / **`no_dollars_fp`**
+  (both OPTIONAL — absent if no offers that side), each a list of `[price_in_dollars, count_fp]` STRING pairs, e.g.
+  `["0.0800","300.00"]` (price = dollar string; size = fixed-point count string). **orderbook_delta:**
+  `market_ticker`, `market_id`, **`price_dollars`** (str), **`delta_fp`** (str, SIGNED fixed-point contract delta,
+  2 dp, e.g. `"-54.00"`), **`side`** (`yes`|`no`), optional `client_order_id`/`ts`(deprecated)/`ts_ms`/`subaccount`.
+  This corrected the adapter, which had assumed `price`/`delta`/`yes`/`no` (margin-ws names) and would NOT have
+  parsed real frames. Adapter parses prices/sizes as exact Decimal (dollars / fixed-point), never float.
+  **Still UNVERIFIED (need a LIVE capture — Kalshi WS requires auth and the box has no Kalshi creds yet, flagged to
+  Berk):** (1) the `msg`-WRAPPER — the official example shows fields FLAT (top-level) while the margin schema nests
+  them under `msg`; the adapter parses BOTH robustly. (2) seq SCOPE (per-sid vs shared-across-subscription) and
+  reset-on-reconnect — a community source (dev.to) says seq is subscription-wide and a gap should resubscribe the
+  whole subscription (matches our in-band resync); we keep per-sid +1 tracking pending confirmation. 1.1b closure =
+  that real-frame capture.
 
 ## KXBTC15M settlement fields (ROADMAP 1.2)
 
