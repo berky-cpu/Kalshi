@@ -80,6 +80,15 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   (Phase-2 empirical); no live poll loop / systemd unit yet (→ relates to 1.3).
 - [ ] **1.3** VPS deployment (`deploy/`): systemd units, log rotation, disk alarms, daily
   upload/backup. *Accept:* 72 h unattended run with < 0.1 % gap time per feed.
+  *Code built 2026-10-17 (run itself pending a VPS):* runner `python -m kbtc.recorders.run <feed>`
+  (7 feeds, env-only auth, no order path); `deploy/` systemd units (recorder@, settlement/health/backup/
+  disk-alarm timers, hardened non-root), generic rclone `backup.sh` (copy + verify, non-destructive),
+  `disk_alarm.py`, journald logging, `deploy/README.md` runbook. Review
+  [REV-009](notes/reviews/REV-009-deploy-layer.md) (PASS). **126 tests pass.**
+  *Before the 72 h run (Berk, on the box):* pick `KBTC_BACKUP_REMOTE` + rclone config; wire an alert
+  notifier (OnFailure stub); `uv add cryptography` (Kalshi signing); Kalshi resync stays a fail-safe
+  no-op until 1.1b. The run exercises `run_recorder`'s live loop (currently `# pragma: no cover`) and
+  is measured by the 1.4 health report's `gap_time_fraction < 0.1% AND msgs_per_s >= floor` gate.
 - [x] **1.4** Health report script: per-feed uptime, message rates, gaps, disk usage.
   *Done 2026-10-16:* `src/kbtc/recorders/health.py` + CLI + tests (92 pass). Review
   [REV-007](notes/reviews/REV-007-roadmap-1.4-health.md) (PASS, Round 2). Per-feed disk/rate/coverage +
