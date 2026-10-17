@@ -43,10 +43,22 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
 
 ## Phase 1 — Record everything (owner: data-engineer)
 
-- [ ] **1.1** Venue adapters on top of `recorders/writer.py`: Kalshi (`orderbook_delta`,
+- [x] **1.1** Venue adapters on top of `recorders/writer.py`: Kalshi (`orderbook_delta`,
   `trade`, market lifecycle), Coinbase L3, Kraken L3, Bitstamp live orders, Binance + Bybit
   perp L2/trades. Gap detection via sequence numbers, auto-reconnect + resnapshot.
   *Accept:* each adapter has a replay test on a recorded fixture; gaps are logged, not silent.
+  *Done 2026-10-16 (five crypto venues):* `src/kbtc/recorders/{base,coinbase,kraken,bitstamp,binance,bybit}.py`
+  + replay tests w/ seeded gaps (65 pass). Review [REV-005](notes/reviews/REV-005-roadmap-1.1-recorders.md)
+  (FAIL→PASS, Round 2). Split IO layer vs. pure processor; `resync_on_gap` keeps trade-tape gaps log-only;
+  Kraken CRC32 externally validated vs the documented example (`1063832831`). **Kalshi split to 1.1b.**
+  *Open (→ later integration):* the actual resync FETCH (REST/in-band snapshot) is stubbed/untested (F8);
+  Bitstamp endpoint/envelope + Binance stream speeds/aggTrade stay PARTIAL pending a human fetch (0.4 open items).
+- [ ] **1.1b Kalshi WS adapter — finalize.** `docs/feeds.md`/0.4 never specced Kalshi's own feed; the
+  adapter (`recorders/kalshi.py`) ships with endpoints/auth/subscribe/frame VERIFIED but the KXBTC15M
+  **payload schema** (yes/no vs bid/ask; cents-int vs dollar-string) and **seq gap semantics** UNVERIFIED
+  (the `docs.kalshi.com/websockets` reference 404'd 2026-10-16). *Accept:* verify payload + seq against the
+  Kalshi WS reference (human/authenticated fetch), replace the synthetic fixture with a captured real frame,
+  record in `docs/feeds.md` + `docs/facts.md`, red-team sign-off. Owner: data-engineer.
 - [ ] **1.2** Settlement capture: record every KXBTC15M market's final result and settlement value.
 - [ ] **1.3** VPS deployment (`deploy/`): systemd units, log rotation, disk alarms, daily
   upload/backup. *Accept:* 72 h unattended run with < 0.1 % gap time per feed.
