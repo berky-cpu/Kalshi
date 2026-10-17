@@ -1,5 +1,7 @@
 from decimal import Decimal
 
+import pytest
+
 from kbtc.recorders.base import (
     ASK,
     BID,
@@ -59,6 +61,76 @@ def test_order_id_book_aggregates_levels_and_checksum_stable():
     c1 = kraken_crc32(b)
     b.modify("2", qty="0.5")  # no-op value
     assert kraken_crc32(b) == c1
+
+
+def _full_scan_levels(book, side):
+    """Reference top-of-book aggregation by a from-scratch scan of the authoritative order store.
+
+    This is exactly the pre-optimization ``OrderIdBook.levels`` body: sum resting-order qty per
+    price over ALL orders, keeping a price key as long as >=1 order rests there (so a price whose
+    orders sum to 0 is retained), then sort best-first.
+    """
+    agg: dict = {}
+    for o in book.orders.values():
+        if o.side == side:
+            agg[o.price] = agg.get(o.price, Decimal(0)) + o.qty
+    rev = side == BID
+    return sorted(agg.items(), key=lambda kv: kv[0], reverse=rev)
+
+
+# Spread of seeds so a future refactor can't regress on a code path one seed under-weights
+# (red-team LOW hardening). 20251017 is the original seed the reviewer confirmed has teeth; the
+# 0..29 range gives broad, reproducible coverage. Per-seed step count stays modest so the full
+# matrix runs in well under a second.
+@pytest.mark.parametrize("seed", [20251017, *range(30)])
+def test_order_id_book_incremental_aggregate_matches_full_scan_property(seed):
+    """The derived price→qty cache must equal a from-scratch scan after EVERY mutation.
+
+    Drives a long randomized sequence of add/modify/delete/clear — prices sharing levels, qty
+    changes, price-changing modifies, deletes of absent ids, re-adds under an existing id — and
+    checks both sides' ``levels(side)`` against the reference scan at every step, plus a few top-n
+    slices and ``best_bid``/``best_ask``. This is the cache-coherence guard for the perf fix.
+    """
+    import random
+
+    rng = random.Random(seed)
+    b = OrderIdBook()
+    prices = [Decimal(p) for p in ("99.0", "99.5", "100.0", "100.5", "101.0")]
+    live: dict[str, str] = {}  # order_id -> side, mirror of what we believe rests
+
+    def check():
+        for side in (BID, ASK):
+            full = _full_scan_levels(b, side)
+            assert b.levels(side) == full
+            for n in (0, 1, 2, 3, 10):
+                assert b.levels(side, n) == full[:n]
+            # best_* agree with the scan's top price (None when empty).
+            best = full[0][0] if full else None
+            got = b.best_bid() if side == BID else b.best_ask()
+            assert got == best
+
+    steps = 600
+    for step in range(steps):
+        op = rng.random()
+        oid = str(rng.randint(0, 40))  # small id space ⇒ frequent re-adds / collisions
+        if op < 0.40:  # add (may overwrite an existing id)
+            side = rng.choice([BID, ASK])
+            price = rng.choice(prices)
+            qty = Decimal(rng.choice(["0", "0.5", "1.0", "2.5", "10"]))
+            b.add(oid, side, price, qty)
+            live[oid] = side
+        elif op < 0.70:  # modify (qty and/or price); frequently targets an absent id
+            qty = Decimal(rng.choice(["0", "0.25", "3.0", "7.5"])) if rng.random() < 0.8 else None
+            price = rng.choice(prices) if rng.random() < 0.5 else None
+            b.modify(oid, qty=qty, price=price)
+        elif op < 0.95:  # delete (frequently an absent id)
+            b.delete(oid)
+            live.pop(oid, None)
+        else:  # occasional full clear
+            b.clear()
+            live.clear()
+        check()
+    assert step == steps - 1
 
 
 def test_normalize_side():

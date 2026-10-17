@@ -38,12 +38,26 @@ def l2_levels(book: Any, levels: int) -> list[tuple[str, int, Decimal, Decimal]]
     ZERO-SIZE LEVELS ARE DROPPED here (red-team #5): ``OrderIdBook`` keeps a ``(price, 0)`` entry
     after a ``change``/``modify`` reduces an order to size 0 without a delete (unlike
     ``PriceLevelBook.set``, which removes a 0-qty level). Such a level is not real resting liquidity
-    and must not appear in L2 — nor consume a top-N slot — so we filter ``size == 0`` over the FULL
-    side before taking the top ``levels`` (dropping it in the normalize layer, not the recorder book).
+    and must not appear in L2 — nor consume a top-N slot — so we filter ``size == 0`` before taking
+    the top ``levels`` (dropping it in the normalize layer, not the recorder book).
+
+    PERFORMANCE: we request a BOUNDED top-``want`` from ``book.levels`` rather than the whole side,
+    so a deep L3 book no longer materializes thousands of levels on every event (the 2.2 normalize
+    pathology). In the common case (no 0-size levels in the window) a single ``levels(side, levels)``
+    call suffices; only when 0-size levels eat into the window do we widen it and retry, still
+    yielding the top ``levels`` real levels. ``OrderIdBook.levels`` serves top-N in O(n) from its
+    incremental price→qty aggregate.
     """
     out: list[tuple[str, int, Decimal, Decimal]] = []
     for side in (BID, ASK):
-        kept = [(price, size) for price, size in book.levels(side, None) if size != 0]
+        want = levels
+        while True:
+            lv = book.levels(side, want)
+            kept = [(price, size) for price, size in lv if size != 0]
+            # Enough real levels, or we've already seen the whole (shorter) side.
+            if len(kept) >= levels or len(lv) < want:
+                break
+            want *= 2  # 0-size levels consumed the window; widen and retry
         for i, (price, size) in enumerate(kept[:levels]):
             out.append((side, i, price, size))
     return out
