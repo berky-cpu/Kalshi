@@ -30,10 +30,14 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from sortedcontainers import SortedDict
+
 logger = logging.getLogger("kbtc.recorders")
 logger.addHandler(logging.NullHandler())
 
 now_ns = time.time_ns
+
+_ZERO = Decimal(0)
 
 # Normalized side labels used across every venue.
 BID = "bid"
@@ -178,21 +182,63 @@ class OrderIdBook:
 
     Insertion order within a price level is preserved (an ``OrderedDict``), which Kraken's
     CRC32 checksum relies on ("orders in queue order").
+
+    PERFORMANCE (offline-normalize pathology fix): ``self.orders`` is the authoritative store and
+    keeps its ordering/semantics (``grouped``/``side_orders`` feed ``kraken_crc32`` by time
+    priority within a level — do not change that). On top of it we maintain a DERIVED, per-side
+    ``price → summed-qty`` aggregate (``_agg``) in a ``SortedDict``, updated INCREMENTALLY on every
+    ``add``/``modify``/``delete``/``clear``. This makes ``levels(side, n)`` cheap top-N (no full
+    O(N-orders) scan + re-sort per event, which pegged a core on multi-hour L3 replays). A separate
+    ``_count`` (price → number of resting orders) tells us when a price level empties, so a price
+    key survives even while its summed qty is 0 (a ``modify`` to qty 0 without a delete keeps the
+    order resting; the 0-size level is dropped later in ``normalize.extract.l2_levels``, matching the
+    old full-scan behaviour). The aggregate is a cache kept EXACTLY in sync with ``self.orders`` —
+    the property test in ``tests/test_recorders_base.py`` asserts it equals a from-scratch scan at
+    every step.
     """
 
     def __init__(self) -> None:
         self.orders: OrderedDict[str, Order] = OrderedDict()
+        # Derived top-N cache (see class docstring). Keyed by Decimal price, ascending; bids read
+        # from the high end, asks from the low end.
+        self._agg: dict[str, SortedDict] = {BID: SortedDict(), ASK: SortedDict()}
+        self._count: dict[str, dict[Decimal, int]] = {BID: {}, ASK: {}}
+
+    # -- incremental aggregate maintenance (private) ------------------------------------
+    def _agg_add(self, side: str, price: Decimal, qty: Decimal) -> None:
+        agg, cnt = self._agg[side], self._count[side]
+        agg[price] = agg.get(price, _ZERO) + qty
+        cnt[price] = cnt.get(price, 0) + 1
+
+    def _agg_remove(self, side: str, price: Decimal, qty: Decimal) -> None:
+        agg, cnt = self._agg[side], self._count[side]
+        c = cnt.get(price, 0) - 1
+        if c <= 0:
+            cnt.pop(price, None)
+            agg.pop(price, None)
+        else:
+            cnt[price] = c
+            agg[price] = agg[price] - qty
 
     def add(self, order_id: str, side: str, price: Any, qty: Any,
             ts: str | None = None) -> None:
+        old = self.orders.get(order_id)
+        if old is not None:
+            # Re-add under an existing id (overwrite): drop the old contribution first so the
+            # aggregate stays coherent. ``self.orders[id] = ...`` below keeps the OrderedDict slot
+            # (reassigning an existing key does not move it), preserving queue order for the CRC.
+            self._agg_remove(old.side, old.price, old.qty)
         ps, qs = str(price), str(qty)
-        self.orders[order_id] = Order(side, _dec(price), _dec(qty), ps, qs, ts)
+        o = Order(side, _dec(price), _dec(qty), ps, qs, ts)
+        self.orders[order_id] = o
+        self._agg_add(side, o.price, o.qty)
 
     def modify(self, order_id: str, qty: Any | None = None, price: Any | None = None,
                ts: str | None = None) -> bool:
         o = self.orders.get(order_id)
         if o is None:
             return False  # modify for an order we don't hold — normal, ignore
+        old_side, old_price, old_qty = o.side, o.price, o.qty
         if qty is not None:
             o.qty, o.qty_str = _dec(qty), str(qty)
         if price is not None:
@@ -201,13 +247,27 @@ class OrderIdBook:
             # Kraken sends the authoritative (possibly fresh) order timestamp on every modify;
             # adopt it so time-priority ordering in the CRC stays correct when priority is lost.
             o.ts = ts
+        # Keep the derived aggregate in sync with whatever changed.
+        if o.price != old_price:
+            self._agg_remove(old_side, old_price, old_qty)
+            self._agg_add(o.side, o.price, o.qty)
+        elif o.qty != old_qty:
+            self._agg[old_side][old_price] = self._agg[old_side][old_price] + (o.qty - old_qty)
         return True
 
     def delete(self, order_id: str) -> bool:
-        return self.orders.pop(order_id, None) is not None
+        o = self.orders.pop(order_id, None)
+        if o is None:
+            return False
+        self._agg_remove(o.side, o.price, o.qty)
+        return True
 
     def clear(self) -> None:
         self.orders.clear()
+        self._agg[BID].clear()
+        self._agg[ASK].clear()
+        self._count[BID].clear()
+        self._count[ASK].clear()
 
     def side_orders(self, side: str) -> list[Order]:
         return [o for o in self.orders.values() if o.side == side]
@@ -221,20 +281,30 @@ class OrderIdBook:
         return out
 
     def levels(self, side: str, n: int | None = None) -> list[tuple[Decimal, Decimal]]:
-        agg: dict[Decimal, Decimal] = {}
-        for o in self.side_orders(side):
-            agg[o.price] = agg.get(o.price, Decimal(0)) + o.qty
-        rev = side == BID
-        out = sorted(agg.items(), key=lambda kv: kv[0], reverse=rev)
-        return out[:n] if n is not None else out
+        """Top-``n`` ``(price, summed-qty)`` best-first (bids high→low, asks low→high).
+
+        Reads the incremental ``_agg`` cache (sorted by price), so this is O(n) for a bounded ``n``
+        and O(levels) for ``n is None`` — never the old O(N-orders) scan + re-sort. A price key with
+        summed qty 0 (order reduced to 0 but not deleted) is retained here, exactly as the old
+        full-scan did; ``normalize.extract.l2_levels`` is what drops 0-size L2 levels.
+        """
+        agg = self._agg[side]
+        keys = agg.keys()
+        if n is not None and n <= 0:
+            return []
+        if side == BID:  # highest prices first
+            sel = reversed(keys if n is None else keys[-n:])
+        else:  # lowest prices first
+            sel = iter(keys if n is None else keys[:n])
+        return [(p, agg[p]) for p in sel]
 
     def best_bid(self) -> Decimal | None:
-        lv = self.levels(BID, 1)
-        return lv[0][0] if lv else None
+        agg = self._agg[BID]
+        return agg.keys()[-1] if agg else None
 
     def best_ask(self) -> Decimal | None:
-        lv = self.levels(ASK, 1)
-        return lv[0][0] if lv else None
+        agg = self._agg[ASK]
+        return agg.keys()[0] if agg else None
 
 
 # --------------------------------------------------------------------------------------
