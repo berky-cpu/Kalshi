@@ -20,6 +20,8 @@ from kbtc.recorders.health import (
     compute_health,
     data_classifier,
     discover_feeds,
+    is_batch_dataset,
+    main,
     make_processor,
     render_table,
 )
@@ -299,6 +301,174 @@ def test_sequence_jump_is_one_gap_not_a_cascade(tmp_path):
     assert fh.sequence_gap_events == [
         {"reason": "sequence jump", "expected": 103, "got": 105, "recv_ts_ns": T0 + 2 * NS}
     ]
+
+
+# --------------------------------------------------------------------------------------
+# (a) Batch dataset exclusion — settlement is a 5-min batch job, NOT a streaming feed.
+# --------------------------------------------------------------------------------------
+def test_settlement_batch_dataset_excluded_from_streaming_health(tmp_path):
+    """``kalshi/settlement`` is written by a 5-minute BATCH job: a few records every 5 min. The
+    long quiet intervals between batches are not downtime, so the streaming health report must
+    NOT discover it as a feed, must not emit a per-feed row for it, and must not let its (false)
+    0% uptime drag the overall ``healthy`` verdict."""
+    root = tmp_path / "raw"
+    # A real streaming feed: dense Coinbase book events, 1/s.
+    with RotatingZstdWriter(root, "coinbase", "full") as w:
+        for i, seq in enumerate(range(101, 111)):
+            w.write(_coinbase_open(seq, f"o{i}"), recv_ts_ns=T0 + i * NS)
+    # The settlement batch dataset: a handful of records, one burst every 5 minutes.
+    with RotatingZstdWriter(root, "kalshi", "settlement") as w:
+        for i in range(3):
+            w.write(json.dumps({"type": "settlement", "market": "KXBTC", "i": i}),
+                    recv_ts_ns=T0 + i * 300 * NS)
+
+    # The batch classifier flags settlement; discover_feeds still lists it (the normalizer reuses
+    # discover_feeds and must see settlement), but the HEALTH REPORT excludes it.
+    assert is_batch_dataset("kalshi", "settlement") is True
+    assert is_batch_dataset("coinbase", "full") is False
+    assert ("kalshi", "settlement") in discover_feeds(root)  # shared discovery still lists it
+
+    report = compute_health(root, T0, T0 + 10 * NS, max_quiet_s=2.0)
+    # No settlement row, and the lone streaming feed is healthy -> overall healthy.
+    assert [(f.venue, f.channel) for f in report.feeds] == [("coinbase", "full")]
+    assert "kalshi/settlement" not in report.unhealthy_feeds
+    assert report.all_healthy is True
+
+
+# --------------------------------------------------------------------------------------
+# (b) Own-window rule — a feed is judged only over the period it was actually recording.
+# --------------------------------------------------------------------------------------
+def test_own_window_clamp_counts_mid_and_tail_gaps_but_not_lead_in(tmp_path):
+    """F5 (single-feed view): a feed is judged over its OWN running window. The pre-first-data
+    lead-in is dropped (not downtime) and surfaced as ``late_start_s``, but a genuine mid-stream
+    hole WITHIN its span still counts. The cross-feed outage check is exercised separately."""
+    root = tmp_path / "raw"
+    with RotatingZstdWriter(root, "coinbase", "full") as w:
+        seq = 101
+        secs = list(range(50, 141, 2)) + list(range(180, 199, 2))  # start +50s, hole +140..+180
+        for s in secs:
+            w.write(_coinbase_open(seq, f"c{seq}"), recv_ts_ns=T0 + s * NS)
+            seq += 1
+
+    fh = compute_feed_health(root, "coinbase", "full", T0, T0 + 200 * NS, max_quiet_s=5.0)
+
+    assert fh.first_ts_ns == T0 + 50 * NS
+    assert fh.window_start_ns == T0 + 50 * NS       # coverage clamped to own first data (F5)
+    assert fh.late_start_s == pytest.approx(50.0)   # the dropped lead-in is still surfaced
+    assert fh.down_from_start is False              # single-feed compute never cross-flags
+
+    # Exactly one mid-stream hole; NO lead-in gap from T0.
+    assert len(fh.coverage_gaps) == 1
+    assert fh.coverage_gaps[0].start_ns == T0 + 140 * NS
+    assert fh.coverage_gaps[0].end_ns == T0 + 180 * NS
+    assert fh.coverage_gaps[0].duration_s == pytest.approx(40.0)
+    assert fh.downtime_ns == 40 * NS
+    # Gap fraction is over the OWN window (150s), not the full 200s window.
+    assert fh.gap_time_fraction == pytest.approx(40 * NS / (fh.window_end_ns - fh.window_start_ns))
+
+
+def test_dead_from_start_feed_flagged_when_another_feed_covered_the_lead_in(tmp_path):
+    """F1 (the dangerous direction red-team flagged): one feed is dead for nearly the whole
+    recording period while another records throughout. The own-window clamp ALONE would read the
+    dead feed ~100% uptime / healthy (the mask); the cross-feed discriminator must flag it
+    (``down_from_start``, ``healthy=False``) so ``all_healthy`` is False and the CLI exits non-zero."""
+    root = tmp_path / "raw"
+    # Feed Y records throughout [T0 .. T0+599s], 1/s -> proves the box was live and recording.
+    with RotatingZstdWriter(root, "coinbase", "full") as w:
+        for i, seq in enumerate(range(101, 701)):
+            w.write(_coinbase_open(seq, f"c{i}"), recv_ts_ns=T0 + i * NS)
+    # Feed X has NO data until the last 5 seconds of that period.
+    with RotatingZstdWriter(root, "bitstamp", "live_orders_btcusd") as w:
+        prev = "e0"
+        for i, s in enumerate(range(595, 600)):
+            eid = f"e{i + 1}"
+            w.write(_bitstamp_order(eid, prev, i, 1000 + i), recv_ts_ns=T0 + s * NS)
+            prev = eid
+
+    report = compute_health(root)  # auto window = [T0 .. T0+599s + 1]
+    feeds = {(f.venue, f.channel): f for f in report.feeds}
+    x = feeds[("bitstamp", "live_orders_btcusd")]
+    y = feeds[("coinbase", "full")]
+
+    # The MASK that F5 alone would produce: X reads ~100% up over its own 5-second window...
+    assert x.uptime_fraction == pytest.approx(1.0)
+    # ...but the cross-feed check catches the real outage and gates it.
+    assert x.down_from_start is True
+    assert x.healthy is False
+    assert x.late_start_s == pytest.approx(595.0)
+    assert "bitstamp/live_orders_btcusd" in report.unhealthy_feeds
+
+    # Y recorded throughout -> a legitimate early feed, not flagged.
+    assert y.down_from_start is False
+    assert y.late_start_s == pytest.approx(0.0)
+
+    # Overall verdict fails and the CLI exits non-zero so a cron/systemd alarm fires.
+    assert report.all_healthy is False
+    assert main(["--root", str(root)]) == 1
+
+    # The table surfaces the late start so a 99%-dead feed cannot hide as "yes / 100.000".
+    table = render_table(report)
+    assert "LATE-START" in table
+    assert "595s!" in table
+
+
+def test_shared_late_start_with_uncovered_lead_in_is_not_flagged(tmp_path):
+    """F1 (the legitimate direction): both feeds come up together after the window start (e.g. the
+    box booted then) — NO other feed covered the lead-in — so neither is flagged and both read
+    healthy over their own windows. The late-start fix must NOT fire here (no false alarm)."""
+    root = tmp_path / "raw"
+    with RotatingZstdWriter(root, "coinbase", "full") as w:
+        for i, seq in enumerate(range(101, 302)):          # +100..+300s, 1/s
+            w.write(_coinbase_open(seq, f"c{i}"), recv_ts_ns=T0 + (100 + i) * NS)
+    with RotatingZstdWriter(root, "bitstamp", "live_orders_btcusd") as w:
+        prev = "e0"
+        for i in range(201):                                # +100..+300s, 1/s
+            eid = f"e{i + 1}"
+            w.write(_bitstamp_order(eid, prev, i, 1000 + i), recv_ts_ns=T0 + (100 + i) * NS)
+            prev = eid
+
+    # Explicit window STARTS before both feeds (T0), yet nothing recorded in [T0 .. +100s].
+    report = compute_health(root, T0, T0 + 301 * NS, max_quiet_s=5.0)
+    feeds = {(f.venue, f.channel): f for f in report.feeds}
+    for key in (("coinbase", "full"), ("bitstamp", "live_orders_btcusd")):
+        f = feeds[key]
+        assert f.first_ts_ns == T0 + 100 * NS
+        assert f.late_start_s == pytest.approx(100.0)   # a material lead-in...
+        assert f.down_from_start is False               # ...but UNCOVERED -> not a flagged outage
+        assert f.uptime_fraction == pytest.approx(1.0)  # judged over its own window only
+        assert f.healthy is True
+    assert report.all_healthy is True
+    assert main(["--root", str(root), "--start", str(T0), "--end", str(T0 + 301 * NS)]) == 0
+
+
+def test_feeds_booting_seconds_apart_under_explicit_start_are_not_flagged(tmp_path):
+    """F1 refinement: with an operator-supplied ``--start`` predating the feeds, two feeds that
+    come up within < max_quiet_s of each other must NOT trip the outage gate. Gating is on the
+    DEMONSTRABLE cross-feed silent span (here 3s < max_quiet 5s), not on lateness vs the requested
+    start (both are ~100s late relative to --start)."""
+    root = tmp_path / "raw"
+    # Feed A up at +100s; feed B up at +103s (3s later). Both dense 1/s to +300s.
+    with RotatingZstdWriter(root, "coinbase", "full") as w:
+        for i, seq in enumerate(range(101, 302)):          # +100..+300s
+            w.write(_coinbase_open(seq, f"c{i}"), recv_ts_ns=T0 + (100 + i) * NS)
+    with RotatingZstdWriter(root, "bitstamp", "live_orders_btcusd") as w:
+        prev = "e0"
+        for i in range(198):                                # +103..+300s
+            eid = f"e{i + 1}"
+            w.write(_bitstamp_order(eid, prev, i, 1000 + i), recv_ts_ns=T0 + (103 + i) * NS)
+            prev = eid
+
+    report = compute_health(root, T0, T0 + 301 * NS, max_quiet_s=5.0)
+    feeds = {(f.venue, f.channel): f for f in report.feeds}
+    late = feeds[("bitstamp", "live_orders_btcusd")]
+
+    # B is late vs the requested --start (its display column shows ~103s)...
+    assert late.first_ts_ns == T0 + 103 * NS
+    assert late.late_start_s == pytest.approx(103.0)
+    # ...but the provable silent span vs the earliest feed is only 3s (< max_quiet) -> NOT flagged.
+    assert late.down_from_start is False
+    assert late.healthy is True
+    assert report.all_healthy is True
 
 
 def test_kraken_sequence_gap_count_marked_as_upper_bound():

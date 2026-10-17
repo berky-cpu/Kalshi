@@ -4,6 +4,14 @@ PURE analysis, no live sockets (ROADMAP 1.4). Given a data root and a time windo
 hourly-rotating ``.jsonl.zst`` files written by ``recorders/writer.py`` and computes, per feed
 ``{venue, channel}``:
 
+STREAMING FEEDS ONLY. The report covers continuous market-data streams. Batch (non-streaming)
+datasets written by a periodic job — e.g. ``kalshi/settlement``, a 5-minute capture of a few
+records every 5 min — are NOT feeds: their quiet intervals between batches are not downtime, so
+measuring them as a stream reads a false ``uptime 0% / gap_time 100% / healthy=no``. Such
+datasets are deny-listed (:func:`is_batch_dataset`) and excluded from the per-feed rows, the
+auto-window data bounds, and the overall ``healthy`` verdict. (They are NOT removed from
+:func:`discover_feeds`, which the normalizer reuses and must still see.)
+
 DATA vs LIVENESS (the gating-correctness rule). Every metric below is based on **data frames
 only** — actual book/trade/lifecycle events — NOT on control frames (subscription acks,
 heartbeats, pongs, status/error). A feed whose book has stalled but whose connection still emits
@@ -19,11 +27,24 @@ counting all frames and sets ``data_classified = False`` so the caller knows.)
   asymmetry (F3): the rate uses the data span while coverage below uses the full window — a
   deliberate choice so a single sparse burst is not mistaken for window-wide throughput; the
   ``healthy`` gate combines both so neither alone can give a false pass. Also per-hour data counts.
-* **Uptime / coverage** — the fraction of the requested window actually covered by DATA and the
-  largest no-data gaps. A *coverage gap* is any interval with no data frame longer than
-  ``max_quiet_s`` (configurable); its full duration counts as downtime. Heartbeats do NOT fill a
-  gap. ``gap_time_fraction = downtime / window``; ``uptime_fraction = 1 - gap_time_fraction``.
+* **Uptime / coverage** — the fraction of the feed's own recording window actually covered by
+  DATA and the largest no-data gaps. A *coverage gap* is any interval with no data frame longer
+  than ``max_quiet_s`` (configurable); its full duration counts as downtime. Heartbeats do NOT
+  fill a gap. ``gap_time_fraction = downtime / window``; ``uptime_fraction = 1 - gap_time_fraction``.
   The ``gap_time_fraction`` is the primary ROADMAP 1.3 "< 0.1 % gap time per feed" metric.
+  OWN-WINDOW RULE (F5): each feed's coverage window starts at its OWN first data point, not at
+  the global/requested window start — a feed that began recording late is judged only over the
+  period it was actually up, never penalized for time before it existed. The coverage end stays
+  at the report end, so genuine mid-stream gaps and a dead tail still count as downtime; only the
+  pre-first-data lead-in is dropped. An explicit ``--start``/``--end`` still bounds the records
+  read and caps the end; it does not force the dropped lead-in back in.
+* **Cross-feed late-start gate** (F1) — dropping the lead-in (F5) must not MASK a real outage: a
+  feed dead for most of the recording period would otherwise read ~100% uptime. Each feed reports
+  ``late_start_s`` (the uncounted lead-in) and ``down_from_start``: if another feed had data
+  during this feed's lead-in — proving the box was live and recording while this one was silent —
+  the silence is a real outage, so ``down_from_start`` is set and ``healthy`` forced False (the
+  CLI then exits non-zero). If NO other feed covered the lead-in (shared start / box boot), the
+  late start is legitimate and not flagged. See :func:`_flag_down_from_start`.
 * **Sequence gaps** — we do NOT re-implement gap detection. We import each venue's pure
   ``MessageProcessor`` (the same ones the live recorders run) and REPLAY the recorded raw
   payloads through it, then count the structured ``GapDetected`` events it emits. A feed whose
@@ -135,6 +156,32 @@ def make_processor(venue: str, channel: str) -> tuple[MessageProcessor | None, P
 # snapshot its replayed gap count is an upper bound. Every other venue re-anchors cleanly (one
 # gap per drop), so its count is exact.
 _UPPER_BOUND_GAP_VENUES = {"kraken"}
+
+
+# --------------------------------------------------------------------------------------
+# Batch (non-streaming) datasets — EXCLUDED from the streaming health report.
+#
+# The health report measures *streaming* market-data feeds: continuous book/trade sockets whose
+# quiet intervals are genuine downtime. Some datasets under the same data root are written by a
+# periodic BATCH job instead (e.g. ``kalshi/settlement`` — a 5-minute capture that writes a few
+# records every 5 min). Their long quiet gaps between batches are NOT downtime, so feeding them
+# through the coverage metric produces a false alarm (``uptime 0%, gap_time 100%, healthy=no``).
+# A batch dataset is not a streaming feed: we deny-list it so it never becomes a per-feed row and
+# never drags the overall ``healthy`` verdict. The denylist is by the full ``(venue, channel)``
+# PAIR (F2), not the channel name alone — so a different venue's legitimately-streaming channel
+# that happens to be named "settlement" is not silently dropped.
+_BATCH_DATASETS = {("kalshi", "settlement")}
+
+
+def is_batch_dataset(venue: str, channel: str) -> bool:
+    """True if ``{venue, channel}`` is a batch (non-streaming) dataset excluded from the report.
+
+    Batch datasets (e.g. ``kalshi/settlement``) are written by a periodic job, not a continuous
+    stream, so the quiet intervals between batches are not downtime and must not be measured as
+    such. Matched on the full ``(venue, channel)`` pair. Such feeds are excluded from the report's
+    feed rows and from the auto-window data bounds (but NOT from :func:`discover_feeds`).
+    """
+    return (venue.lower(), (channel or "").lower()) in _BATCH_DATASETS
 
 
 # --------------------------------------------------------------------------------------
@@ -251,11 +298,15 @@ class FeedHealth:
     n_files: int
     disk_bytes: int
     disk_bytes_per_day: dict[str, int]
-    # coverage / uptime
+    # coverage / uptime (measured over this feed's OWN window [first_data .. report_end])
     uptime_fraction: float
     gap_time_fraction: float
     downtime_ns: int
     coverage_gaps: list[CoverageGap]  # sorted largest-first
+    # cross-feed late-start discriminator (F1)
+    requested_start_ns: int       # window start actually requested (auto global-min, or --start)
+    late_start_s: float           # max(0, first_data_ts - requested_start): the uncounted lead-in
+    down_from_start: bool         # another feed covered that lead-in => real outage, GATES unhealthy
     # sequence gaps
     sequence_gaps_supported: bool
     n_sequence_gaps: int | None
@@ -300,6 +351,9 @@ class FeedHealth:
             "gap_time_fraction": self.gap_time_fraction,
             "downtime_ns": self.downtime_ns,
             "coverage_gaps": [g.to_dict() for g in self.coverage_gaps],
+            "requested_start_ns": self.requested_start_ns,
+            "late_start_s": self.late_start_s,
+            "down_from_start": self.down_from_start,
             "sequence_gaps_supported": self.sequence_gaps_supported,
             "n_sequence_gaps": self.n_sequence_gaps,
             "sequence_gaps_exact": self.sequence_gaps_exact,
@@ -371,7 +425,12 @@ class HealthReport:
 # Filesystem discovery.
 # --------------------------------------------------------------------------------------
 def discover_feeds(root: str | Path) -> list[tuple[str, str]]:
-    """Return sorted ``(venue, channel)`` pairs found under ``root`` (dirs with ``date=*`` data)."""
+    """Return sorted ``(venue, channel)`` pairs found under ``root`` (dirs with ``date=*`` data).
+
+    This lists ALL datasets, including batch ones (e.g. ``kalshi/settlement``) — the normalizer
+    reuses it and must see them. The *health report* filters batch datasets separately via
+    :func:`is_batch_dataset` (see :func:`compute_health`).
+    """
     root = Path(root)
     feeds: set[tuple[str, str]] = set()
     for datedir in root.glob("*/*/date=*"):
@@ -421,6 +480,9 @@ def data_time_bounds(root: str | Path) -> tuple[int, int] | None:
     lo: int | None = None
     hi: int | None = None
     for f in root.glob("*/*/date=*/*.jsonl.zst"):
+        parts = f.relative_to(root).parts
+        if len(parts) >= 2 and is_batch_dataset(parts[0], parts[1]):
+            continue  # batch datasets must not stretch the auto-window (they are not feeds)
         for rec in read_records(f):
             ts = rec.get("recv_ts_ns")
             if ts is None:
@@ -528,9 +590,25 @@ def compute_feed_health(root: str | Path, venue: str, channel: str,
     # healthy gate pairs this with gap_time so a single burst cannot pass as window-wide throughput.
     msgs_per_s = (n / (span_ns / NS_PER_S)) if span_ns > 0 else 0.0
 
+    # (F5) Window coverage from the feed's OWN first data point, not the global window start. A
+    # feed that began recording late (e.g. a constituent that came online 38 min after another)
+    # must not be penalized for the period before it existed. The report end (``end_ns``) is kept
+    # as the coverage end, so genuine downtime at the TAIL — and any mid-stream gap WITHIN the
+    # feed's own span — still counts as downtime (we only drop the pre-first-data lead-in). An
+    # explicit ``--start``/``--end`` still bounds which records are read and still caps the end;
+    # this clamp only moves the start forward to where the feed's data actually begins.
+    #
+    # Dropping the lead-in from THIS feed's gap_time is correct for "is the feed healthy while
+    # running", but on its own it can MASK a real outage (a feed dead for most of the recording
+    # period reads 100%). The masking is resolved at the report level (F1): compute_health records
+    # the uncounted lead-in as ``late_start_s`` and, if ANOTHER feed had data during it, gates this
+    # feed unhealthy via ``down_from_start``. Here we only expose the raw lead-in; the cross-feed
+    # decision needs all feeds and lives in compute_health.
+    cov_start_ns = first_ts if (first_ts is not None and first_ts > start_ns) else start_ns
+    late_start_s = (first_ts - start_ns) / NS_PER_S if first_ts is not None else 0.0
     max_quiet_ns = int(max_quiet_s * NS_PER_S)
-    downtime_ns, gaps = _coverage(timestamps, start_ns, end_ns, max_quiet_ns)
-    window_ns = end_ns - start_ns
+    downtime_ns, gaps = _coverage(timestamps, cov_start_ns, end_ns, max_quiet_ns)
+    window_ns = end_ns - cov_start_ns
     gap_time_fraction = downtime_ns / window_ns
     uptime_fraction = 1.0 - gap_time_fraction
 
@@ -554,7 +632,7 @@ def compute_feed_health(root: str | Path, venue: str, channel: str,
     return FeedHealth(
         venue=venue,
         channel=channel,
-        window_start_ns=start_ns,
+        window_start_ns=cov_start_ns,  # the feed's own coverage window start (F5)
         window_end_ns=end_ns,
         max_quiet_s=max_quiet_s,
         n_messages=n,
@@ -571,6 +649,9 @@ def compute_feed_health(root: str | Path, venue: str, channel: str,
         gap_time_fraction=gap_time_fraction,
         downtime_ns=downtime_ns,
         coverage_gaps=gaps,
+        requested_start_ns=start_ns,
+        late_start_s=late_start_s,
+        down_from_start=False,  # cross-feed decision filled in by compute_health
         sequence_gaps_supported=supported,
         n_sequence_gaps=n_seq_gaps,
         sequence_gap_reasons=reasons,
@@ -599,13 +680,57 @@ def compute_health(root: str | Path, start_ns: int | None = None, end_ns: int | 
             lo, hi = bounds
             start_ns = start_ns if start_ns is not None else lo
             end_ns = end_ns if end_ns is not None else hi
+    # Streaming feeds only: batch (non-streaming) datasets such as kalshi/settlement are excluded
+    # here (not in discover_feeds, which the normalizer reuses and must see) — see is_batch_dataset.
     feeds = [
         compute_feed_health(root, venue, channel, start_ns, end_ns, max_quiet_s,
                             gap_threshold=gap_threshold, min_rate=min_rate)
         for venue, channel in discover_feeds(root)
+        if not is_batch_dataset(venue, channel)
     ]
+    _flag_down_from_start(feeds, max_quiet_s)
     return HealthReport(root=str(root), window_start_ns=start_ns, window_end_ns=end_ns,
                         max_quiet_s=max_quiet_s, feeds=feeds)
+
+
+def _flag_down_from_start(feeds: list[FeedHealth], max_quiet_s: float) -> None:
+    """Cross-feed late-start discriminator (F1): tell "deployed later" from "died at start".
+
+    The per-feed own-window clamp (F5) drops each feed's pre-first-data lead-in so a feed is only
+    judged while it was running. On its own that would MASK a real outage: a feed dead for most of
+    the shared recording period would read ~100% uptime. We resolve it here, where every feed is
+    visible:
+
+    A feed's late start is a REAL outage (not a legitimate later deployment) iff another feed was
+    PROVABLY recording while this one was silent for longer than ``max_quiet_s``:
+
+        earliest_other_first_ts < f.first_ts_ns  AND
+        (f.first_ts_ns - earliest_other_first_ts) > max_quiet_ns
+
+    The second term is the demonstrable cross-feed outage span — the stretch during which some
+    other feed had data but this one did not. We gate on THAT span (not ``late_start_s``, which is
+    measured relative to the requested window start) so that an operator-supplied ``--start`` that
+    predates the feeds does not turn a few-seconds-apart boot into a false alarm. ``late_start_s``
+    is still reported for the display column.
+
+    When this holds we set ``down_from_start`` and force ``healthy=False`` (so ``all_healthy`` is
+    False and the CLI exits non-zero). If no other feed was recording materially before this one
+    (shared start / box boot, or a window deliberately chosen to predate a genuinely later-deployed
+    feed with nothing else running then), the late start is legitimate and left healthy.
+    """
+    present = [f.first_ts_ns for f in feeds if f.first_ts_ns is not None]
+    if not present:
+        return
+    earliest = min(present)
+    max_quiet_ns = int(max_quiet_s * NS_PER_S)
+    for f in feeds:
+        if f.first_ts_ns is None:
+            continue
+        # Flag only when another feed was provably recording while this one was silent for more
+        # than max_quiet_s — the demonstrable outage span, independent of the requested start.
+        if earliest < f.first_ts_ns and (f.first_ts_ns - earliest) > max_quiet_ns:
+            f.down_from_start = True
+            f.healthy = False
 
 
 # --------------------------------------------------------------------------------------
@@ -621,13 +746,16 @@ def human_bytes(n: int) -> str:
 
 
 def render_table(report: HealthReport) -> str:
-    rows = [("VENUE", "CHANNEL", "HEALTHY", "UPTIME%", "MSGS/S", "SEQ-GAPS", "GAP-TIME%", "DISK")]
+    rows = [("VENUE", "CHANNEL", "HEALTHY", "UPTIME%", "MSGS/S", "SEQ-GAPS", "GAP-TIME%",
+             "LATE-START", "DISK")]
     for f in report.feeds:
         if not f.sequence_gaps_supported:
             seq = "n/a"
         else:
             # Trailing '~' flags an upper-bound count (Kraken in-band CRC resync, F4).
             seq = f"{f.n_sequence_gaps}" + ("" if f.sequence_gaps_exact else "~")
+        # Trailing '!' flags a cross-feed real outage (dead from window start while others ran).
+        late = f"{f.late_start_s:.0f}s" + ("!" if f.down_from_start else "")
         rows.append((
             f.venue,
             f.channel,
@@ -636,6 +764,7 @@ def render_table(report: HealthReport) -> str:
             f"{f.msgs_per_s:.4g}",
             seq,
             f"{f.gap_time_pct:.3f}",
+            late,
             human_bytes(f.disk_bytes),
         ))
     widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
