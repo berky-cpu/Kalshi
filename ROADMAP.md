@@ -151,6 +151,19 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
 - [ ] **2.2** BRTI replica from constituent books per `docs/brti-spec.md`.
   *Accept:* tracking error vs. published settlement values reported (median, p95, max);
   target p95 < $5 on settlement averages.
+  *Build done 2026-10-17 (result still open):* `src/kbtc/index/` replicates the full CF v17.0 pipeline
+  (consolidate → cap `C_T` = trimmed mean + 5σ → uncross → PV curves → utilized depth `D=0.5%` →
+  depth-weighted mid with **λ = 1/(0.3·v_T)** → §5.3 deviation filter, 5%→2.5% hysteresis). All §6
+  constants are `BrtiParams`; no look-ahead (O(log n) as-of book, compute failure → GAP never
+  interpolated). Tracking harness (`tracking.py`) averages the replica over the 60×1 s window at both
+  endpoints vs. Kalshi `floor_strike`/`expiration_value`, with an **out-of-sample `evaluate_oos`** that
+  tunes the free levers (endpoint O-5, `cap_mean` O-4, `median_base` O-9) on TRAIN dates only, freezes,
+  and reports p95 on a **disjoint, date-split TEST set** (hard overlap guard). Coverage (`venues_used`) is
+  attached to every headline stat; published values are Decimal end-to-end. Review
+  [REV-012](notes/reviews/REV-012-roadmap-2.2-brti-replica.md) (FAIL→PASS). **209 tests pass.**
+  **Not ticked:** the p95<$5 *result* needs real recorded data on a walk-forward split; only 2/7
+  constituents are live (Bitstamp + Kraken) and data is still accumulating. Run the real-data
+  tracking-error study (and the 2/7→full-constituent coverage study) when there is enough data.
 - [ ] **2.3** Lead–lag study: perp flow vs. replica (Hayashi–Yoshida). Report horizons.
 
 ## Phase 3 — Fair value + signals (owner: quant-modeler)
