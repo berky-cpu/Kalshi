@@ -10,6 +10,7 @@ wrap ``recorders.writer.read_records``. Reads/transforms only — no network, no
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Iterable, Iterator
@@ -21,9 +22,13 @@ from kbtc.recorders.health import (
     data_classifier,
     make_processor,
 )
+from kbtc.recorders.resync import parse_rest_snapshot_record
 
 from . import checkpoint as ckpt
 from . import extract
+
+logger = logging.getLogger("kbtc.normalize")
+logger.addHandler(logging.NullHandler())
 
 # Prime functions by venue (REST-snapshot venues need a baseline not in the recording). Reused
 # verbatim from the health module so normalization and health agree on replay seeding.
@@ -33,11 +38,14 @@ _PRIME = {"coinbase": _prime_coinbase, "binance": _prime_binance}
 def _is_recorded_complete_snapshot(venue: str, msg: Any) -> bool:
     """True iff ``msg`` is a RECORDED complete-book snapshot that establishes a full baseline.
 
-    Only the in-band-snapshot venues carry such a frame in the recording (Kraken/Bybit ``snapshot``,
-    Kalshi ``orderbook_snapshot``). Coinbase/Binance/Bitstamp seed from a REST snapshot that the
-    recorder applies in-memory and does NOT persist, so no such frame ever appears in a WS-only
-    recording → they never reach a complete baseline offline (``synced`` stays False — the honest
-    result; the reconstructed book is partial). See schema.py COMPLETENESS MARKER.
+    This covers the in-band-snapshot venues whose snapshot rides in the WS stream (Kraken/Bybit
+    ``snapshot``, Kalshi ``orderbook_snapshot``). Coinbase/Binance/Bitstamp seed from a REST
+    snapshot; as of ROADMAP 1.1c the recorder PERSISTS that snapshot into the recording as a tagged
+    envelope (``parse_rest_snapshot_record``), which ``normalize_crypto`` handles SEPARATELY (it
+    routes ``body`` to ``apply_snapshot`` and marks the baseline there). An OLD, snapshot-less
+    recording of those venues carries no such frame → they never reach a complete baseline offline
+    (``synced`` stays False — the honest result; the reconstructed book is partial). See schema.py
+    COMPLETENESS MARKER.
     """
     if not isinstance(msg, dict):
         return False
@@ -87,6 +95,44 @@ def normalize_crypto(venue: str, channel: str, records: Iterable[Record],
     for recv, raw in records:
         msg = as_dict(raw)
 
+        # 0) Persisted REST snapshot (ROADMAP 1.1c). Coinbase/Binance/Bitstamp recordings may now
+        # OPEN with (and re-anchor on) a tagged REST-snapshot envelope. Route its ``body`` to
+        # ``apply_snapshot`` to establish a COMPLETE book baseline — the pre-existing resting orders
+        # become part of the reconstruction, not just post-recording deltas. This IS the resync, so
+        # it clears any pending divergence and establishes the baseline → ``synced`` goes True.
+        rest = parse_rest_snapshot_record(msg)
+        if rest is not None:
+            # N1 (defense-in-depth): only apply a snapshot stamped for THIS feed. A cross-wired or
+            # corrupt record carrying a foreign venue/channel must not seed the wrong processor —
+            # skip and log, don't crash.
+            rec_venue = str(rest.get("venue", "")).lower()
+            rec_channel = rest.get("channel")
+            if rec_venue != venue.lower() or rec_channel != channel:
+                logger.warning(
+                    "skipping REST snapshot stamped for %s/%s on %s/%s feed",
+                    rest.get("venue"), rec_channel, venue, channel,
+                    extra={"event": "rest_snapshot_feed_mismatch", "venue": venue,
+                           "channel": channel, "record_venue": rest.get("venue"),
+                           "record_channel": rec_channel},
+                )
+                continue
+            # N2 (resilience): a malformed body must not abort the whole replay. On failure, log,
+            # leave the baseline unset (subsequent rows stay synced=False), and move on.
+            try:
+                proc.apply_snapshot(rest["body"], recv)
+            except Exception as exc:  # noqa: BLE001 - any parse/shape error in the stored body
+                logger.warning(
+                    "malformed REST snapshot on %s/%s skipped: %s", venue, channel, exc,
+                    extra={"event": "rest_snapshot_malformed", "venue": venue, "channel": channel},
+                )
+                continue
+            baseline_established = True
+            pending_resync = False
+            primed = True  # the persisted snapshot IS the baseline; no first-message priming needed
+            snap_id, last_fp = _emit_book(res, proc, levels, recv, None, venue, channel,
+                                          snap_id, last_fp, synced=True)
+            continue
+
         # 1) Trade tape (independent of the book processor).
         for t in extract.trade_rows(venue, channel, raw):
             t["recv_ts_ns"] = recv
@@ -127,7 +173,12 @@ def normalize_crypto(venue: str, channel: str, records: Iterable[Record],
         if proc.needs_resnapshot:
             pending_resync = True
             proc.clear_resnapshot()
-            if prime is not None:
+            # Re-priming (empty-reseed from the next message) only seeds the INITIAL baseline for a
+            # REST-snapshot venue whose recording carries NO persisted snapshot (old format). Once a
+            # persisted REST snapshot has established a baseline, re-anchoring comes from the next
+            # persisted snapshot (handled above), so we must NOT re-prime — the book stays diverged
+            # and is honestly emitted as ``synced=False`` until that snapshot lands.
+            if prime is not None and not baseline_established:
                 primed = False
 
         synced = baseline_established and not pending_resync
@@ -139,16 +190,31 @@ def normalize_crypto(venue: str, channel: str, records: Iterable[Record],
         # wrongly suppress every Bitstamp snapshot. The completeness ``synced`` flag is a COLUMN,
         # not a filter — rows are always kept, just marked.
         if do_emit and getattr(proc, "book", None) is not None:
-            rows = extract.l2_levels(proc.book, levels)
-            fp = extract.book_fingerprint(rows)
-            if rows and fp != last_fp:
-                last_fp = fp
-                snap_id += 1
-                exch = extract.exch_ts_ns(venue, msg)
-                for side, lvl, price, size in rows:
-                    res.books.append(_book_row(recv, exch, venue, proc.product, channel,
-                                               snap_id, synced, side, lvl, price, size))
+            exch = extract.exch_ts_ns(venue, msg)
+            snap_id, last_fp = _emit_book(res, proc, levels, recv, exch, venue, channel,
+                                          snap_id, last_fp, synced=synced)
     return res
+
+
+def _emit_book(res: NormalizeResult, proc: Any, levels: int, recv: int, exch: int | None,
+               venue: str, channel: str, snap_id: int, last_fp: tuple | None,
+               synced: bool) -> tuple[int, tuple | None]:
+    """Emit one top-N L2 snapshot iff the aggregated top-N changed; return ``(snap_id, last_fp)``.
+
+    Shared by the normal delta path and the persisted-REST-snapshot path so both increment
+    ``snap_id`` and dedupe against ``last_fp`` identically (no divergent emit logic).
+    """
+    if getattr(proc, "book", None) is None:
+        return snap_id, last_fp
+    rows = extract.l2_levels(proc.book, levels)
+    fp = extract.book_fingerprint(rows)
+    if rows and fp != last_fp:
+        last_fp = fp
+        snap_id += 1
+        for side, lvl, price, size in rows:
+            res.books.append(_book_row(recv, exch, venue, proc.product, channel,
+                                       snap_id, synced, side, lvl, price, size))
+    return snap_id, last_fp
 
 
 def _book_row(recv: int, exch: int | None, venue: str, product: str, channel: str,

@@ -40,11 +40,14 @@ Effective Time MUST order by ``(recv_ts_ns, snap_id)`` and take the greatest suc
 COMPLETENESS MARKER (``synced``). Each snapshot carries a boolean ``synced`` = "this book state is
 reconstructed from a COMPLETE baseline and is not mid-resync". It is False (a) from feed start until
 a complete-book baseline is established — an in-band ``snapshot`` frame (Kraken/Bybit/Kalshi) or a
-persisted REST snapshot (Coinbase/Binance/Bitstamp), the latter being fetched in-memory by the
-recorder and NOT written to the recording, so a WS-only replay of those venues stays ``synced=False``
-throughout (the honest result: the book is partial) — and (b) while the feed is post-gap/
-pre-resync (``needs_resnapshot``/``awaiting_snapshot``), so a diverged book is flagged, never
-silently emitted as valid. Rows are NEVER suppressed; downstream filters on ``synced`` as needed.
+persisted REST snapshot (Coinbase/Binance/Bitstamp). As of ROADMAP 1.1c the recorder PERSISTS the
+REST snapshot it fetches into the recording (a tagged envelope, both on initial sync and on gap
+resync), so a replay of those venues reconstructs a COMPLETE book and goes ``synced=True`` from the
+snapshot onward; an OLD, snapshot-less (WS-only) recording of those venues has no such baseline and
+stays ``synced=False`` throughout (the honest result: the book is partial). It is also False (b)
+while the feed is post-gap/pre-resync (``needs_resnapshot``/``awaiting_snapshot``), so a diverged
+book is flagged, never silently emitted as valid. Rows are NEVER suppressed; downstream filters on
+``synced`` as needed.
 """
 from __future__ import annotations
 

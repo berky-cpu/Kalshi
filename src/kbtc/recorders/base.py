@@ -433,6 +433,15 @@ async def run_recorder(  # pragma: no cover - requires a live socket
                     await ws.send(payload)
 
                 resnapshot = resync_builder(_send)  # bind the resyncer to this connection
+                # ROADMAP 1.1c: let a REST-snapshot resyncer (Coinbase/Binance/Bitstamp) PERSIST
+                # its fetched snapshot into this same recording (tagged), so an offline replay can
+                # rebuild a COMPLETE book instead of starting empty. The snapshot record is stamped
+                # at fetch time and written via the SAME ``writer`` as inbound frames, so it is
+                # ordered in the stream just before the deltas it precedes. In-band resyncers
+                # (Kraken/Bybit/Kalshi) expose no ``persist`` attribute and are left untouched —
+                # their snapshot already arrives in the WS stream and is recorded as a normal frame.
+                if hasattr(resnapshot, "persist"):
+                    resnapshot.persist = lambda record, ts: writer.write(record, recv_ts_ns=ts)
 
                 async def _heartbeat() -> None:
                     if not (config.ping_message and config.ping_interval_s):

@@ -211,6 +211,116 @@ def test_synced_false_throughout_for_venues_without_a_recorded_rest_baseline():
         assert all(v is False for v in _synced_by_snap(res.books).values())
 
 
+# ---------------------------------------------------------------------------------------
+# Persisted REST snapshot (ROADMAP 1.1c): Coinbase/Binance/Bitstamp reach a COMPLETE baseline
+# offline from the tagged snapshot the recorder now writes into the stream.
+# ---------------------------------------------------------------------------------------
+def test_coinbase_persisted_snapshot_gives_complete_book_and_synced_true():
+    res = pipeline.normalize_crypto("coinbase", "full",
+                                    _records("coinbase", "full_with_snapshot.jsonl"))
+    snaps = _snaps(res.books)
+    synced = _synced_by_snap(res.books)
+
+    # snap 1 IS the persisted REST snapshot: the PRE-EXISTING resting orders (pre1/pre2/pre3) are
+    # present. A snapshot-less replay would have started from an empty book and missed all three —
+    # this is exactly the completeness 1.1c fixes. Baseline established ⇒ synced True.
+    assert snaps[1] == [
+        ("bid", 0, "26990.00", "3.0"), ("bid", 1, "26980.00", "2.0"),
+        ("ask", 0, "27010.00", "1.0"),
+    ]
+    assert synced[1] is True
+
+    # Deltas apply ON TOP of the complete baseline (new best bid/ask), still synced.
+    last = snaps[max(snaps)]
+    assert last == [
+        ("bid", 0, "27000.00", "0.50"), ("bid", 1, "26990.00", "3.0"), ("bid", 2, "26980.00", "2.0"),
+        ("ask", 0, "27005.00", "0.80"), ("ask", 1, "27010.00", "1.0"),
+    ]
+    assert all(v is True for v in synced.values())
+
+
+def test_bitstamp_persisted_snapshot_gap_flips_synced_until_reanchored():
+    res = pipeline.normalize_crypto("bitstamp", "live_orders_btcusd",
+                                    _records("bitstamp", "live_orders_with_snapshot.jsonl"))
+    snaps = _snaps(res.books)
+    synced = _synced_by_snap(res.books)
+
+    # snap 1 = persisted REST snapshot: complete book incl. the pre-existing resting orders.
+    assert snaps[1] == [
+        ("bid", 0, "27000.00", "3.00"), ("bid", 1, "26990.00", "2.00"),
+        ("ask", 0, "27010.00", "1.00"),
+    ]
+    assert synced[1] is True
+
+    # A mid-stream gap (event e3's pre_event_id chain break) flips the diverged book to
+    # synced=False, and it STAYS False for the following clean delta too — never silently valid.
+    false_ids = [sid for sid, v in synced.items() if v is False]
+    assert false_ids, "expected a post-gap synced=False span"
+
+    # The re-anchor is the second persisted REST snapshot (snap 6): a COMPLETE rebuilt book,
+    # synced True. Every False snap precedes it (gap → False → re-anchored True).
+    reanchor_id = 6
+    assert snaps[reanchor_id] == [("bid", 0, "27001.00", "9.00"), ("ask", 0, "27020.00", "4.00")]
+    assert synced[reanchor_id] is True
+    assert all(sid < reanchor_id for sid in false_ids)
+
+    # N3: a post-reseed STALE event (microtimestamp 5500 <= the reseed floor 6000) is DROPPED in
+    # the replay path — the stale order @26000 never enters any emitted book, and it produces no
+    # new snapshot. The fresh event (7000 > floor) re-anchors and applies as the new best bid.
+    assert all(r[2] != "26000.00" for rows in snaps.values() for r in rows)
+    final = snaps[max(snaps)]
+    assert final == [
+        ("bid", 0, "27002.00", "1.00"), ("bid", 1, "27001.00", "9.00"),
+        ("ask", 0, "27020.00", "4.00"),
+    ]
+    assert synced[max(snaps)] is True  # applied above the floor, on the re-anchored baseline
+
+
+# ---------------------------------------------------------------------------------------
+# Persisted REST snapshot — envelope robustness (red-team N1/N2).
+# ---------------------------------------------------------------------------------------
+def test_rest_snapshot_for_wrong_feed_is_skipped_and_logged(caplog):
+    # N1: an envelope stamped for a DIFFERENT venue/channel must NOT seed this processor.
+    foreign = {"__kbtc_rest_snapshot__": 1, "venue": "binance", "channel": "depth",
+               "body": {"sequence": 100, "bids": [["1.0", "1.0", "x"]], "asks": []}}
+    delta = {"type": "open", "product_id": "BTC-USD", "sequence": 101, "order_id": "d1",
+             "side": "buy", "price": "27000.00", "remaining_size": "0.5"}
+    with caplog.at_level("WARNING", logger="kbtc.normalize"):
+        res = pipeline.normalize_crypto("coinbase", "full", [(T0, foreign), (T0 + 1, delta)])
+    # No baseline established from the foreign snapshot → the coinbase feed stays synced=False.
+    assert all(v is False for v in _synced_by_snap(res.books).values())
+    assert any("stamped for" in r.message for r in caplog.records)
+
+
+def test_malformed_rest_snapshot_is_skipped_then_a_valid_one_recovers(caplog):
+    # N2: a garbage body that makes apply_snapshot raise must NOT abort the replay; a later valid
+    # snapshot still establishes the baseline.
+    bad = {"__kbtc_rest_snapshot__": 1, "venue": "coinbase", "channel": "full",
+           "body": {"garbage": True}}  # no "sequence" → apply_snapshot raises KeyError
+    good = {"__kbtc_rest_snapshot__": 1, "venue": "coinbase", "channel": "full",
+            "body": {"sequence": 100, "bids": [["26990.00", "3.0", "pre1"]],
+                     "asks": [["27010.00", "1.0", "pre3"]]}}
+    delta = {"type": "open", "product_id": "BTC-USD", "sequence": 101, "order_id": "d1",
+             "side": "buy", "price": "27000.00", "remaining_size": "0.5"}
+    with caplog.at_level("WARNING", logger="kbtc.normalize"):
+        res = pipeline.normalize_crypto("coinbase", "full",
+                                        [(T0, bad), (T0 + 1, good), (T0 + 2, delta)])
+    assert any("malformed" in r.message for r in caplog.records)
+    synced = _synced_by_snap(res.books)
+    assert res.books and all(v is True for v in synced.values())  # recovered from the valid snapshot
+
+
+def test_old_snapshotless_fixtures_still_replay_synced_false_no_crash():
+    # ROADMAP 1.1c backward-compat: a recording with NO tagged snapshot (old format / the original
+    # fixtures) must replay fine and stay synced=False for the REST venues — no crash, no false True.
+    for venue, channel, fx in (("coinbase", "full", "full.jsonl"),
+                               ("binance", "perp", "depth.jsonl"),
+                               ("bitstamp", "live_orders_btcusd", "live_orders.jsonl")):
+        res = pipeline.normalize_crypto(venue, channel, _records(venue, fx))
+        assert res.books  # rows ARE emitted, just honestly marked incomplete
+        assert all(v is False for v in _synced_by_snap(res.books).values())
+
+
 def test_synced_true_after_inband_snapshot_and_false_post_mismatch():
     # Kraken: snapshot (snap 1) + good update (snap 2) are synced; the checksum-mismatch snap (3)
     # is flagged synced=False (diverged, pre-resync) — not silently emitted as valid.

@@ -1,0 +1,8 @@
+{"__kbtc_rest_snapshot__":1,"venue":"bitstamp","channel":"live_orders_btcusd","body":{"microtimestamp":"1000","bids":[["27000.00","3.00","b1"],["26990.00","2.00","b2"]],"asks":[["27010.00","1.00","a1"]]}}
+{"event":"order_created","channel":"live_orders_btcusd","event_id":"e1","pre_event_id":"e0","data":{"id":101,"order_type":0,"price":"26995.00","amount":"1.50","microtimestamp":"2000"}}
+{"event":"order_created","channel":"live_orders_btcusd","event_id":"e2","pre_event_id":"e1","data":{"id":102,"order_type":0,"price":"26994.00","amount":"1.00","microtimestamp":"3000"}}
+{"event":"order_created","channel":"live_orders_btcusd","event_id":"e3","pre_event_id":"BROKEN","data":{"id":103,"order_type":0,"price":"26993.00","amount":"2.00","microtimestamp":"4000"}}
+{"event":"order_created","channel":"live_orders_btcusd","event_id":"e4","pre_event_id":"e3","data":{"id":104,"order_type":0,"price":"26992.00","amount":"0.50","microtimestamp":"5000"}}
+{"__kbtc_rest_snapshot__":1,"venue":"bitstamp","channel":"live_orders_btcusd","body":{"microtimestamp":"6000","bids":[["27001.00","9.00","r1"]],"asks":[["27020.00","4.00","r2"]]}}
+{"event":"order_created","channel":"live_orders_btcusd","event_id":"s1","pre_event_id":"s0","data":{"id":901,"order_type":0,"price":"26000.00","amount":"5.00","microtimestamp":"5500"}}
+{"event":"order_created","channel":"live_orders_btcusd","event_id":"f1","pre_event_id":"f0","data":{"id":105,"order_type":0,"price":"27002.00","amount":"1.00","microtimestamp":"7000"}}
