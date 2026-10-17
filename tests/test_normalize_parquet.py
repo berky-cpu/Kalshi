@@ -57,11 +57,12 @@ def test_kalshi_book_normalization(tmp_path):
                                      venue="kalshi", channel="market")
     back = pl.read_parquet(paths[0])
     final = back.filter(pl.col("snap_id") == back["snap_id"].max()).sort(["side", "level"])
-    # after delta seq2 (+50 on yes 40) and seq3 (remove yes 41); the seq5 'no' delta is a seq-gap
-    # (seq 4 missing) and is dropped, so no 58 stays 120 — a gap is never silently applied.
+    # VERIFIED schema (dollar-string prices, fixed-point counts): after delta seq2 (+50 on yes
+    # 0.40) and seq3 (remove yes 0.41); the seq5 'no' delta is a seq-gap (seq 4 missing) and is
+    # dropped, so no 0.58 stays 120 — a gap is never silently applied.
     got = [(r["side"], r["price"], r["size"]) for r in final.iter_rows(named=True)]
-    assert got == [("no", Decimal("58"), Decimal("120")),
-                   ("yes", Decimal("40"), Decimal("150"))]
+    assert got == [("no", Decimal("0.58"), Decimal("120.00")),
+                   ("yes", Decimal("0.40"), Decimal("150.00"))]
 
 
 # ---------------------------------------------------------------------------------------
