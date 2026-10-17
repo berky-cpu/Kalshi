@@ -474,3 +474,4 @@ max-connections / message-rate limits not recorded here (not load-bearing for a 
 | Bybit — v5 public orderbook | `https://bybit-exchange.github.io/docs/v5/websocket/public/orderbook` | v5; read 2026-10-16 | VERIFIED |
 | Bybit — v5 WS connect (endpoint, subscribe, heartbeat, limits) | `https://bybit-exchange.github.io/docs/v5/ws/connect` | v5; read 2026-10-16 | VERIFIED |
 | Bybit — v5 public trade | `https://bybit-exchange.github.io/docs/v5/websocket/public/trade` | v5; read 2026-10-16 | VERIFIED |
+| Kalshi — WebSocket **orderbook updates** (orderbook_snapshot/delta schema) | `https://docs.kalshi.com/websockets/orderbook-updates` | read 2026-10-17 | VERIFIED (envelope `type`/`sid`/`seq`; snapshot `yes_dollars_fp`/`no_dollars_fp` `[price_dollars,count_fp]` string pairs; delta `price_dollars`+SIGNED `delta_fp`+`side` yes/no). `msg`-wrapper & seq scope/reset UNVERIFIED — need live capture (WS needs auth) |

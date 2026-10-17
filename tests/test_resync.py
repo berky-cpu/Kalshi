@@ -312,13 +312,15 @@ def test_kalshi_resync_is_fail_safe_noop_pending_1_1b():
     a gap clears the flag, sends NO frames, and the stream stays processable — raw is persisted
     by run_recorder regardless, and the live book is not consumed yet."""
     p = KalshiProcessor(product="KXBTC15M")
-    # Establish a live subscription (sid 7) via an initial snapshot.
+    # Establish a live subscription (sid 7) via an initial snapshot (VERIFIED schema; nested under
+    # ``msg`` to also exercise the robust wrapper parse).
     p.process({"type": "orderbook_snapshot", "sid": 7, "seq": 1,
-               "msg": {"market_ticker": "KXBTC15M-TEST", "yes": [["50", "100"]], "no": []}}, 1)
+               "msg": {"market_ticker": "KXBTC15M-TEST",
+                       "yes_dollars_fp": [["0.50", "100.00"]], "no_dollars_fp": []}}, 1)
     # A seq gap flags a resync.
     p.process({"type": "orderbook_delta", "sid": 7, "seq": 5,
                "msg": {"market_ticker": "KXBTC15M-TEST", "side": "yes",
-                       "price": "50", "delta": "10"}}, 2)
+                       "price_dollars": "0.50", "delta_fp": "10.00"}}, 2)
     assert p.needs_resnapshot is True
 
     send = _FakeSend()
@@ -334,6 +336,7 @@ def test_kalshi_resync_is_fail_safe_noop_pending_1_1b():
     # The stream keeps flowing (raw persisted by run_recorder); a later snapshot still rebuilds.
     p.process({"type": "orderbook_snapshot", "sid": 7, "seq": 9,
                "msg": {"market_ticker": "KXBTC15M-TEST",
-                       "yes": [["51", "200"]], "no": [["49", "80"]]}}, 3)
-    assert p.books["KXBTC15M-TEST"]["yes"] == {51: 200}
-    assert p.books["KXBTC15M-TEST"]["no"] == {49: 80}
+                       "yes_dollars_fp": [["0.51", "200.00"]],
+                       "no_dollars_fp": [["0.49", "80.00"]]}}, 3)
+    assert p.books["KXBTC15M-TEST"]["yes"] == {Decimal("0.51"): Decimal("200.00")}
+    assert p.books["KXBTC15M-TEST"]["no"] == {Decimal("0.49"): Decimal("80.00")}
