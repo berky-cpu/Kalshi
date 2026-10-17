@@ -116,6 +116,22 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   *Open:* Coinbase/Binance/Bitstamp books are flagged **`synced=False`** (the recorder doesn't persist
   the REST baseline — see 1.1c); their exact checkpointing is deferred to the live run. Bybit checkpoint
   informational; Kalshi schema + Binance aggTrade mapping UNVERIFIED (1.1b / feeds.md F-2).
+- [x] **2.1a Replay/health fixes (surfaced by the live run 2026-10-17).** *Done 2026-10-17.*
+  (a) **health: exclude the settlement batch dataset** (was reading 0% uptime). (b) **health: per-feed window
+  from own first data** + a **cross-feed down-from-start gate** so a late window can't MASK a feed that was
+  actually down (another feed covering the lead-in flags it; `LATE-START !` column). Review
+  [REV: 2.1a(a,b)](notes/reviews/) via red-team FAIL→PASS; commit `bdf1c85`.
+  (c) **Kraken reconstruction fix** (commit below): the ~8.5k CRC "gaps"/hr were THREE reconstruction bugs,
+  not data loss — (1) float round-trip in parsing dropped the wire's exact digits; (2) in-level queue order
+  must be **time priority** (oldest `ts` first), not insertion order; (3) a qty-increase `modify` adopts a
+  fresh `ts` (moves to queue back). Now **0 CRC mismatches across 8,193 real updates**; red-team PASS
+  (independently reproduced all real checksums + the published oracle). **Correction:** live Kraken was NOT
+  clean — the broken snapshot CRC had it snapshot-polling (~1.5k snapshots/hr, same connection → "0 restarts"
+  was a false-health signal). **Requires redeploy to the box** (same `KrakenProcessor`) for live recording to
+  track incrementally. *LOW follow-ups:* (i) make the `ts` sort robust to timestamp-format variation (currently
+  ISO-string compare); (ii) **emit periodic in-band Kraken snapshots** to bound the OFFLINE-replay gap on a
+  genuine drop (more relevant now that snapshots are rare post-fix) — before the index/P&L phases consume it.
+
 - [ ] **1.1d Coinbase Advanced Trade L2 adapter (retail, free).** The existing Coinbase adapter targets
   Coinbase **Exchange** `level3`/`full`, which (confirmed 2026-10-17) needs an **institutional Prime account
   (~$5,000 application)** — not viable. Build a new adapter for Coinbase's **retail Advanced Trade**

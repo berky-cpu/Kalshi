@@ -165,6 +165,12 @@ class Order:
     qty: Decimal
     price_str: str  # exact transmitted string (needed for Kraken CRC32)
     qty_str: str
+    # Exchange order timestamp (ISO-8601 string, as transmitted). Kraken level3 orders a price
+    # level by **time priority** (oldest first) for the CRC32, NOT by the order we happened to
+    # receive/insert them; a ``modify`` that raises qty or changes price gets a fresh timestamp
+    # (loses priority). ``None`` for venues/fixtures that carry no per-order timestamp, in which
+    # case ``kraken_crc32`` falls back to insertion order (see that function).
+    ts: str | None = None
 
 
 class OrderIdBook:
@@ -177,11 +183,13 @@ class OrderIdBook:
     def __init__(self) -> None:
         self.orders: OrderedDict[str, Order] = OrderedDict()
 
-    def add(self, order_id: str, side: str, price: Any, qty: Any) -> None:
+    def add(self, order_id: str, side: str, price: Any, qty: Any,
+            ts: str | None = None) -> None:
         ps, qs = str(price), str(qty)
-        self.orders[order_id] = Order(side, _dec(price), _dec(qty), ps, qs)
+        self.orders[order_id] = Order(side, _dec(price), _dec(qty), ps, qs, ts)
 
-    def modify(self, order_id: str, qty: Any | None = None, price: Any | None = None) -> bool:
+    def modify(self, order_id: str, qty: Any | None = None, price: Any | None = None,
+               ts: str | None = None) -> bool:
         o = self.orders.get(order_id)
         if o is None:
             return False  # modify for an order we don't hold — normal, ignore
@@ -189,6 +197,10 @@ class OrderIdBook:
             o.qty, o.qty_str = _dec(qty), str(qty)
         if price is not None:
             o.price, o.price_str = _dec(price), str(price)
+        if ts is not None:
+            # Kraken sends the authoritative (possibly fresh) order timestamp on every modify;
+            # adopt it so time-priority ordering in the CRC stays correct when priority is lost.
+            o.ts = ts
         return True
 
     def delete(self, order_id: str) -> bool:
@@ -238,20 +250,38 @@ def _crc_token(s: str) -> str:
 def kraken_crc32(book: OrderIdBook, top_levels: int = 10) -> int:
     """CRC32 over the top-``top_levels`` price levels per side, asks then bids.
 
-    Asks are taken price-ascending, bids price-descending; within a level the orders are in
-    queue (insertion) order; each order contributes ``price`` then ``qty`` with the decimal
-    point removed and leading zeros stripped, using the venue's *transmitted* strings. Result
-    is cast to unsigned 32-bit. (feeds.md §2.) VERIFIED against Kraken's published L3-guide worked
-    example: the real 21-bid/14-ask input reproduces checksum 1063832831 — asserted by
+    Asks are taken price-ascending, bids price-descending; each order contributes ``price`` then
+    ``qty`` with the decimal point removed and leading zeros stripped, using the venue's
+    *transmitted* strings. Result is cast to unsigned 32-bit. (feeds.md §2.)
+
+    QUEUE ORDER WITHIN A LEVEL (VERIFIED against the real recorded sample, not just the hand-built
+    fixture): the orders at a price are taken in **time priority — oldest ``ts`` first**, which is
+    the queue order Kraken checksums, NOT the order in which we received/inserted them. These differ
+    whenever an order re-enters a level or a ``modify`` refreshes an order's timestamp (an increase
+    or price change loses priority and goes to the back). Sorting is stable, so equal timestamps
+    keep insertion order. When a level's orders carry no ``ts`` (the string-valued ``level3.jsonl``
+    fixture and the official worked example below), we fall back to insertion order — identical to
+    the old behaviour, so those oracles are unaffected.
+
+    VERIFIED against Kraken's published L3-guide worked example: the real 21-bid/14-ask input
+    reproduces checksum 1063832831 — asserted by
     ``tests/test_recorders_kraken.py::test_kraken_crc32_matches_official_worked_example`` (and
-    re-exercised through the normalizer emit path in ``tests/test_normalize_books.py``).
+    re-exercised through the normalizer emit path in ``tests/test_normalize_books.py``). Also
+    VERIFIED to reproduce the venue checksum on every update of a real recorded hour — see
+    ``tests/test_recorders_kraken.py::test_kraken_crc32_matches_real_recording``.
     """
     parts: list[str] = []
     for side, reverse in ((ASK, False), (BID, True)):
         grouped = book.grouped(side)
         prices = sorted(grouped.keys(), reverse=reverse)[:top_levels]
         for price in prices:
-            for o in grouped[price]:
+            level = grouped[price]
+            # Time priority: oldest order first. ``sorted`` is stable, so None/equal timestamps
+            # keep insertion order; only order when every order in the level has a timestamp so a
+            # mixed (partially-timestamped) level can never be silently misordered.
+            if level and all(o.ts is not None for o in level):
+                level = sorted(level, key=lambda o: o.ts)
+            for o in level:
                 parts.append(_crc_token(o.price_str))
                 parts.append(_crc_token(o.qty_str))
     payload = "".join(parts).encode("ascii")

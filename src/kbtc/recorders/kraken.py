@@ -15,6 +15,7 @@ Endpoint host is given three ways across Kraken's own docs (feeds.md F-5) → tr
 """
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from .base import (
@@ -23,9 +24,29 @@ from .base import (
     IoConfig,
     MessageProcessor,
     OrderIdBook,
-    as_dict,
     kraken_crc32,
 )
+
+
+def _as_dict_exact(raw: Any) -> Any:
+    """Parse a Kraken frame while preserving the EXACT transmitted numeric digits.
+
+    Kraken v2 sends ``limit_price`` / ``order_qty`` as JSON *numbers* that carry full precision
+    including trailing zeros (e.g. ``0.00479590``, ``0.00010000``) and prices like ``81450.4``.
+    The CRC32 checksum is computed over those transmitted strings. If we parse them with the
+    default ``json.loads`` they become Python floats and ``str()`` of the float silently DROPS
+    trailing zeros (``0.00479590`` → ``0.0047959``) and can even emit exponent notation for tiny
+    sizes (``1e-05``) — either of which corrupts the CRC token and makes every book diverge on
+    replay. ``parse_float=str`` / ``parse_int=str`` keep the raw digit strings verbatim, so the
+    book stores exactly what the venue transmitted. (This is why the hand-built string-valued
+    ``level3.jsonl`` fixture passed while the real recording did not — the fixture never exercised
+    a float round-trip.) Dicts/lists (already-parsed fixtures) pass through unchanged.
+    """
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8")
+    if isinstance(raw, str):
+        return json.loads(raw, parse_float=str, parse_int=str)
+    return raw
 
 # feeds.md F-5: three-way host conflict; prefer the level3-page value, then auth, then public.
 ENDPOINTS = [
@@ -53,7 +74,7 @@ class KrakenProcessor(MessageProcessor):
         self.awaiting_snapshot = True
 
     def process(self, raw: Any, recv_ts_ns: int) -> list[dict]:
-        msg = as_dict(raw)
+        msg = _as_dict_exact(raw)
         if not isinstance(msg, dict) or msg.get("channel") != "level3":
             return []  # heartbeat / status / subscribe-ack frames
         mtype = msg.get("type")
@@ -78,20 +99,28 @@ class KrakenProcessor(MessageProcessor):
     def _apply_snapshot_entry(self, entry: dict) -> None:
         self.book.clear()
         for o in entry.get("bids", []):
-            self.book.add(str(o["order_id"]), BID, o["limit_price"], o["order_qty"])
+            self.book.add(str(o["order_id"]), BID, o["limit_price"], o["order_qty"],
+                          ts=o.get("timestamp"))
         for o in entry.get("asks", []):
-            self.book.add(str(o["order_id"]), ASK, o["limit_price"], o["order_qty"])
+            self.book.add(str(o["order_id"]), ASK, o["limit_price"], o["order_qty"],
+                          ts=o.get("timestamp"))
         self.synced = True
         self.awaiting_snapshot = False  # the fresh snapshot landed; resume normal checks
 
     def _apply_update_entry(self, entry: dict) -> None:
+        # ``timestamp`` is the order's queue-priority key (time priority); carry it on every add
+        # and modify so ``kraken_crc32`` orders each level exactly as Kraken checksums it. A modify
+        # that raises qty / changes price arrives with a FRESH timestamp (priority lost) — adopting
+        # it moves the order to the back of its level.
         for side, label in ((entry.get("bids", []), BID), (entry.get("asks", []), ASK)):
             for e in side:
                 ev, oid = e["event"], str(e["order_id"])
                 if ev == "add":
-                    self.book.add(oid, label, e["limit_price"], e["order_qty"])
+                    self.book.add(oid, label, e["limit_price"], e["order_qty"],
+                                  ts=e.get("timestamp"))
                 elif ev == "modify":
-                    self.book.modify(oid, qty=e["order_qty"], price=e.get("limit_price"))
+                    self.book.modify(oid, qty=e["order_qty"], price=e.get("limit_price"),
+                                     ts=e.get("timestamp"))
                 elif ev == "delete":
                     self.book.delete(oid)
 
