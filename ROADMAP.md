@@ -89,6 +89,11 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   notifier (OnFailure stub); `uv add cryptography` (Kalshi signing); Kalshi resync stays a fail-safe
   no-op until 1.1b. The run exercises `run_recorder`'s live loop (currently `# pragma: no cover`) and
   is measured by the 1.4 health report's `gap_time_fraction < 0.1% AND msgs_per_s >= floor` gate.
+  *Deployed 2026-10-17* on a Hetzner CPX31 (Ashburn, US-East). **Live & recording 24/7:** Bitstamp
+  (live_orders), Kraken (level3), Kalshi settlement capture, + health/disk timers — all healthy (0 gaps).
+  Pending: Coinbase (→ 1.1d, institutional-blocked), backup remote (`KBTC_BACKUP_REMOTE` unset),
+  Kalshi WS book (1.1b). Binance/Bybit NOT deployed (US-IP geo-blocked from Ashburn). The clean 72 h
+  <0.1%-gap acceptance run is still pending (needs the backup wired + a few more feeds).
 - [x] **1.4** Health report script: per-feed uptime, message rates, gaps, disk usage.
   *Done 2026-10-16:* `src/kbtc/recorders/health.py` + CLI + tests (92 pass). Review
   [REV-007](notes/reviews/REV-007-roadmap-1.4-health.md) (PASS, Round 2). Per-feed disk/rate/coverage +
@@ -111,6 +116,13 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   *Open:* Coinbase/Binance/Bitstamp books are flagged **`synced=False`** (the recorder doesn't persist
   the REST baseline — see 1.1c); their exact checkpointing is deferred to the live run. Bybit checkpoint
   informational; Kalshi schema + Binance aggTrade mapping UNVERIFIED (1.1b / feeds.md F-2).
+- [ ] **1.1d Coinbase Advanced Trade L2 adapter (retail, free).** The existing Coinbase adapter targets
+  Coinbase **Exchange** `level3`/`full`, which (confirmed 2026-10-17) needs an **institutional Prime account
+  (~$5,000 application)** — not viable. Build a new adapter for Coinbase's **retail Advanced Trade**
+  WebSocket **`level2`** (price-level book) instead — sufficient for the BRTI price-volume curves; different
+  endpoint/auth (CDP key, no passphrase) and schema, so it needs its own feed-spec + adapter + replay test.
+  *Until then the index runs on 2/3 constituents (Bitstamp + Kraken).* Owner: data-engineer.
+
 - [x] **1.1c Persist REST snapshots into recordings (recorder completeness).** The recorder applies REST
   order-book snapshots (initial sync + resync) in memory but wrote only inbound WS frames, so
   Coinbase/Binance/Bitstamp recordings could not rebuild a COMPLETE book offline.
