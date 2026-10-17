@@ -154,5 +154,243 @@ def test_cli_date_filter(tmp_path):
     _write_raw(root, "kraken", "level3", load_fixture("kraken", "level3.jsonl"))
     rc = cli.main(["--root", str(root), "--out", str(out), "--date", "2099-01-01"])
     assert rc == 0
-    # no data for that date ⇒ nothing written.
+    # no data for that date ⇒ nothing written (streaming writer creates dirs lazily).
     assert not (out / "books").exists()
+
+
+# ---------------------------------------------------------------------------------------
+# Streaming output == buffered output (the OOM-at-scale fix changed only memory, not rows).
+# ---------------------------------------------------------------------------------------
+def _synth_book_rows(n, t0):
+    """n synthetic book rows on a single date, Decimal prices/sizes, strictly increasing ts."""
+    out = []
+    for i in range(n):
+        side = "bid" if i % 2 == 0 else "ask"
+        out.append({
+            "recv_ts_ns": t0 + i * 1000, "exch_ts_ns": None, "venue": "bitstamp",
+            "product": "BTC/USD", "channel": "live_orders_btcusd", "snap_id": i // 2 + 1,
+            "synced": False, "side": side, "level": 0,
+            "price": Decimal(f"{27000 + (i % 7)}.{i % 100:02d}"),
+            "size": Decimal(f"{1 + (i % 5)}.{i % 10}"),
+        })
+    return out
+
+
+def test_streaming_writer_parity_with_buffered(tmp_path):
+    """PartitionedParquetWriter (row groups, many small chunks) == one buffered write_partitioned:
+    same rows, same order, same schema. Proves chunking changed nothing but memory."""
+    rows = _synth_book_rows(137, T0)  # odd count so the last chunk is partial
+
+    # Buffered reference (the old path).
+    buf_out = tmp_path / "buffered"
+    df = schema.rows_to_df(rows, schema.BOOK_SCHEMA)
+    writer.write_partitioned(buf_out, schema.DS_BOOKS, df,
+                             venue="bitstamp", channel="live_orders_btcusd")
+    ref = pl.read_parquet(buf_out / "books" / "venue=bitstamp"
+                          / "channel=live_orders_btcusd" / "date=2025-10-09" / "part.parquet")
+
+    # Streamed: feed the same rows in small chunks of 10 → multiple row groups in one part.parquet.
+    str_out = tmp_path / "streamed"
+    w = writer.PartitionedParquetWriter(str_out, schema.DS_BOOKS,
+                                        venue="bitstamp", channel="live_orders_btcusd")
+    for i in range(0, len(rows), 10):
+        w.write_df(schema.rows_to_df(rows[i:i + 10], schema.BOOK_SCHEMA))
+    paths = w.close()
+    assert len(paths) == 1
+    got = pl.read_parquet(paths[0])
+
+    # Exact, order-preserving equality (no sort): same rows in the same sequence, same schema.
+    assert got.equals(ref)
+    assert got.schema == df.schema
+    assert got.height == len(rows)
+    # multiple row groups were actually written (streaming, not a single buffered write).
+    import pyarrow.parquet as pq
+    assert pq.ParquetFile(paths[0]).num_row_groups > 1
+
+
+def test_cli_streaming_matches_buffered_normalize(tmp_path):
+    """End-to-end: the streaming CLI writes exactly the rows the buffered normalizer produces."""
+    root = tmp_path / "raw"
+    out = tmp_path / "clean"
+    _write_raw(root, "kraken", "level3", load_fixture("kraken", "level3.jsonl"))
+    assert cli.main(["--root", str(root), "--out", str(out)]) == 0
+    streamed = pl.read_parquet(
+        out / "books" / "venue=kraken" / "channel=level3" / "date=2025-10-09" / "part.parquet")
+
+    res = pipeline.normalize_crypto("kraken", "level3", _records("kraken", "level3.jsonl"))
+    buffered = schema.rows_to_df(res.books, schema.BOOK_SCHEMA)
+    assert streamed.equals(buffered)
+
+
+# ---------------------------------------------------------------------------------------
+# Peak memory is bounded as input grows (the fix): streaming stays flat, buffering grows.
+# ---------------------------------------------------------------------------------------
+def _peak_streaming(out_root, n, chunk, t0):
+    import tracemalloc
+
+    def gen():  # lazy — never materializes all rows
+        for r in _synth_book_rows_iter(n, t0):
+            yield r
+
+    tracemalloc.start()
+    w = writer.PartitionedParquetWriter(out_root, schema.DS_BOOKS,
+                                        venue="bitstamp", channel="live_orders_btcusd")
+    buf = []
+    for r in gen():
+        buf.append(r)
+        if len(buf) >= chunk:
+            w.write_df(schema.rows_to_df(buf, schema.BOOK_SCHEMA))
+            buf.clear()
+    if buf:
+        w.write_df(schema.rows_to_df(buf, schema.BOOK_SCHEMA))
+    w.close()
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    return peak
+
+
+def _peak_buffered(out_root, n, t0):
+    import tracemalloc
+    tracemalloc.start()
+    rows = list(_synth_book_rows_iter(n, t0))  # the old path holds every row
+    df = schema.rows_to_df(rows, schema.BOOK_SCHEMA)
+    writer.write_partitioned(out_root, schema.DS_BOOKS, df,
+                             venue="bitstamp", channel="live_orders_btcusd")
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    return peak
+
+
+def _synth_book_rows_iter(n, t0):
+    for i in range(n):
+        side = "bid" if i % 2 == 0 else "ask"
+        yield {
+            "recv_ts_ns": t0 + i * 1000, "exch_ts_ns": None, "venue": "bitstamp",
+            "product": "BTC/USD", "channel": "live_orders_btcusd", "snap_id": i // 2 + 1,
+            "synced": False, "side": side, "level": 0,
+            "price": Decimal(f"{27000 + (i % 7)}.{i % 100:02d}"),
+            "size": Decimal(f"{1 + (i % 5)}.{i % 10}"),
+        }
+
+
+def test_peak_memory_bounded_when_streaming(tmp_path):
+    small, big, chunk = 20_000, 80_000, 5_000
+
+    s_small = _peak_streaming(tmp_path / "s1", small, chunk, T0)
+    s_big = _peak_streaming(tmp_path / "s2", big, chunk, T0)
+    b_small = _peak_buffered(tmp_path / "b1", small, T0)
+    b_big = _peak_buffered(tmp_path / "b2", big, T0)
+
+    # Streaming peak is FLAT: 4x the rows must not meaningfully grow peak (bounded by chunk size).
+    assert s_big < 1.5 * s_small
+    # Buffering peak GROWS with total rows (the pathology): 4x rows ⇒ clearly higher peak.
+    assert b_big > 2.0 * b_small
+    # At scale, streaming peak is a small fraction of the buffered peak.
+    assert s_big < 0.5 * b_big
+
+
+# ---------------------------------------------------------------------------------------
+# Atomicity: the glob-visible part.parquet appears ONLY on clean completion (no partial files).
+# ---------------------------------------------------------------------------------------
+class _Boom(RuntimeError):
+    pass
+
+
+def _crashing_crypto_raw(root: Path, n_good: int, t0: int) -> None:
+    """Write a Bitstamp live_orders recording whose Nth frame is malformed to blow up mid-replay."""
+    import zstandard as zstd
+
+    # A plausible-enough bitstamp live_orders stream; the processor applies order events. The
+    # crash is injected at the CLI level (below) rather than via a corrupt frame, so we keep the
+    # raw valid and drive a raising generator through the same streaming loop.
+    _write_raw(root, "bitstamp", "live_orders_btcusd",
+               [{"event": "order_created",
+                 "data": {"id": i, "order_type": 0, "price": f"{27000 + i}.00",
+                          "amount": "1.0"}} for i in range(n_good)])
+
+
+def test_partition_write_is_atomic_on_crash(tmp_path, monkeypatch):
+    """A crash mid-stream must NOT leave a glob-visible part.parquet (only a .tmp), and a prior
+    complete part.parquet must survive a crashed re-run untouched."""
+    out = tmp_path / "clean"
+    pdir = (out / "books" / "venue=bitstamp" / "channel=live_orders_btcusd" / "date=2025-10-09")
+
+    rows = _synth_book_rows(60, T0)
+
+    def _raising_stream():
+        # Emit enough to open the writer + flush at least one row group, then crash.
+        for i, r in enumerate(rows):
+            if i == 40:
+                raise _Boom("simulated mid-stream failure")
+            yield (pipeline.BOOK, r)
+
+    # Drive the real CLI streaming loop with a tiny chunk so a row group is flushed before the crash.
+    monkeypatch.setattr(cli, "CHUNK_ROWS", 5)
+    monkeypatch.setattr(pipeline, "stream_crypto",
+                        lambda *a, **k: _raising_stream())
+    root = tmp_path / "raw"
+    _crashing_crypto_raw(root, 3, T0)  # one real raw file so _process_feed reaches the stream loop
+
+    import pytest
+    with pytest.raises(_Boom):
+        cli._process_feed(str(root), str(out), "bitstamp", "live_orders_btcusd", 10, None)
+
+    # (a) No complete-looking part.parquet for the in-flight partition — the loader's glob sees
+    # nothing. (_process_feed's finally runs abort(), which also removes the in-flight .tmp, so a
+    # crashed run leaves zero cruft; a hard kill with no finally would leave only the .tmp, covered
+    # by test_writer_hard_kill_leaves_only_tmp.)
+    assert not (pdir / "part.parquet").exists()
+    assert list(pdir.glob("*.parquet")) == []          # the loader's glob sees nothing
+    assert not (pdir / "part.parquet.tmp").exists()     # graceful abort cleaned the tmp
+
+    # (b) Now a clean run publishes a complete part.parquet (stale .tmp cleared on reopen).
+    monkeypatch.setattr(pipeline, "stream_crypto",
+                        lambda v, c, recs, rep, levels=10: iter((pipeline.BOOK, r) for r in rows))
+    cli._process_feed(str(root), str(out), "bitstamp", "live_orders_btcusd", 10, None)
+    good = pl.read_parquet(pdir / "part.parquet")
+    assert good.height == len(rows)
+    assert not (pdir / "part.parquet.tmp").exists()     # stale tmp cleaned up
+
+    # (c) A crashed RE-RUN must leave the good part.parquet intact (not truncated).
+    before = (pdir / "part.parquet").read_bytes()
+    monkeypatch.setattr(pipeline, "stream_crypto", lambda *a, **k: _raising_stream())
+    with pytest.raises(_Boom):
+        cli._process_feed(str(root), str(out), "bitstamp", "live_orders_btcusd", 10, None)
+    assert (pdir / "part.parquet").read_bytes() == before
+    assert pl.read_parquet(pdir / "part.parquet").height == len(rows)
+
+
+def test_writer_abort_leaves_no_glob_visible_file(tmp_path):
+    """Direct-writer check: write_df then abort() publishes nothing the loader can see."""
+    w = writer.PartitionedParquetWriter(tmp_path, schema.DS_BOOKS,
+                                        venue="bitstamp", channel="live_orders_btcusd")
+    w.write_df(schema.rows_to_df(_synth_book_rows(30, T0), schema.BOOK_SCHEMA))
+    pdir = (tmp_path / "books" / "venue=bitstamp" / "channel=live_orders_btcusd"
+            / "date=2025-10-09")
+    assert (pdir / "part.parquet.tmp").exists()     # streamed to tmp
+    assert not (pdir / "part.parquet").exists()      # not yet published
+    w.abort()
+    assert list(pdir.glob("*.parquet")) == []        # nothing glob-visible
+    assert not (pdir / "part.parquet.tmp").exists()  # tmp cleaned up
+
+
+def test_writer_hard_kill_leaves_only_tmp(tmp_path):
+    """Simulate a hard kill (no close/abort ever runs): in-flight data remains only as a .tmp the
+    loader's glob won't match, and the next (re)open clears that stale tmp before writing."""
+    pdir = (tmp_path / "books" / "venue=bitstamp" / "channel=live_orders_btcusd"
+            / "date=2025-10-09")
+    w = writer.PartitionedParquetWriter(tmp_path, schema.DS_BOOKS,
+                                        venue="bitstamp", channel="live_orders_btcusd")
+    w.write_df(schema.rows_to_df(_synth_book_rows(30, T0), schema.BOOK_SCHEMA))
+    del w  # process "killed" — neither close() nor abort() runs
+    assert (pdir / "part.parquet.tmp").exists()
+    assert list(pdir.glob("*.parquet")) == []        # never glob-visible
+
+    # A fresh run reuses the partition: the stale .tmp is cleared on reopen, then a clean publish.
+    w2 = writer.PartitionedParquetWriter(tmp_path, schema.DS_BOOKS,
+                                         venue="bitstamp", channel="live_orders_btcusd")
+    w2.write_df(schema.rows_to_df(_synth_book_rows(12, T0), schema.BOOK_SCHEMA))
+    w2.close()
+    assert (pdir / "part.parquet").exists()
+    assert not (pdir / "part.parquet.tmp").exists()
+    assert pl.read_parquet(pdir / "part.parquet").height == 12

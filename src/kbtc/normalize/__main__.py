@@ -30,13 +30,19 @@ def _records(paths):
             yield ts, rec.get("raw")
 
 
+# Rows buffered per dataset before a parquet row group is flushed. Bounds peak memory to ~a few
+# chunks (one open writer per active date) independent of total data size — the OOM-at-scale fix.
+CHUNK_ROWS = 50_000
+
+
 def _process_feed(root: str, out: str, venue: str, channel: str, levels: int,
                   date: str | None) -> ckpt.CheckpointReport | None:
     files = writer.gather_feed_files(root, venue, channel, date)
     if not files:
         return None
 
-    # Settlements: a different shape entirely (REST envelopes, not a WS book replay).
+    # Settlements: a different shape entirely (REST envelopes, not a WS book replay). Small per day
+    # (one row per market), so a single buffered write is fine.
     if venue == "kalshi" and channel == "settlement":
         rows = pipeline.settlement_rows(pipeline.read_envelopes(str(f) for f in files))
         df = schema.rows_to_df(rows, schema.SETTLEMENT_SCHEMA)
@@ -44,20 +50,46 @@ def _process_feed(root: str, out: str, venue: str, channel: str, levels: int,
         return None
 
     if venue == "kalshi":
-        res = pipeline.normalize_kalshi(channel, _records(files))
+        report = pipeline.kalshi_report(channel)
+        stream = pipeline.stream_kalshi(channel, _records(files))
         books_ds = schema.DS_KALSHI_BOOKS
         book_schema = schema.KALSHI_BOOK_SCHEMA
     else:
-        res = pipeline.normalize_crypto(venue, channel, _records(files), levels=levels)
+        report = ckpt.new_report(venue, channel)
+        stream = pipeline.stream_crypto(venue, channel, _records(files), report, levels=levels)
         books_ds = schema.DS_BOOKS
         book_schema = schema.BOOK_SCHEMA
 
-    writer.write_partitioned(out, books_ds, schema.rows_to_df(res.books, book_schema),
-                             venue=venue, channel=channel, date=date)
-    writer.write_partitioned(out, schema.DS_TRADES,
-                             schema.rows_to_df(res.trades, schema.TRADE_SCHEMA),
-                             venue=venue, channel=channel, date=date)
-    return res.checkpoint
+    # Stream rows straight to parquet in bounded chunks (never hold the whole run in memory).
+    book_w = writer.PartitionedParquetWriter(out, books_ds, venue=venue, channel=channel, date=date)
+    trade_w = writer.PartitionedParquetWriter(out, schema.DS_TRADES, venue=venue, channel=channel,
+                                              date=date)
+    book_buf: list[dict] = []
+    trade_buf: list[dict] = []
+    try:
+        for kind, row in stream:
+            if kind == pipeline.BOOK:
+                book_buf.append(row)
+                if len(book_buf) >= CHUNK_ROWS:
+                    book_w.write_df(schema.rows_to_df(book_buf, book_schema))
+                    book_buf.clear()
+            else:
+                trade_buf.append(row)
+                if len(trade_buf) >= CHUNK_ROWS:
+                    trade_w.write_df(schema.rows_to_df(trade_buf, schema.TRADE_SCHEMA))
+                    trade_buf.clear()
+        if book_buf:
+            book_w.write_df(schema.rows_to_df(book_buf, book_schema))
+        if trade_buf:
+            trade_w.write_df(schema.rows_to_df(trade_buf, schema.TRADE_SCHEMA))
+        # Publish atomically ONLY after the whole feed replayed without error. A crash before here
+        # leaves temp files (never a glob-visible part.parquet) and any prior complete part intact.
+        book_w.close()
+        trade_w.close()
+    finally:
+        book_w.abort()   # no-op after a successful close(); else discards in-flight temp files
+        trade_w.abort()
+    return report
 
 
 def _render(reports: list[ckpt.CheckpointReport]) -> str:

@@ -74,13 +74,37 @@ Record = tuple[int, Any]  # (recv_ts_ns, raw-json-str-or-dict)
 # ---------------------------------------------------------------------------------------
 def normalize_crypto(venue: str, channel: str, records: Iterable[Record],
                      levels: int = 10) -> NormalizeResult:
-    """Replay a crypto feed → event-driven top-N L2 book rows + trade rows + checkpoint report."""
-    proc, _prime = make_processor(venue, channel)
-    prime = _PRIME.get(venue.lower())
+    """Replay a crypto feed → event-driven top-N L2 book rows + trade rows + checkpoint report.
+
+    Buffers the whole result in memory; fine for tests/small slices. The CLI uses
+    :func:`stream_crypto` instead, which yields the SAME rows in the SAME order without buffering,
+    so peak memory is independent of total data size (the OOM-at-scale fix).
+    """
     report = ckpt.new_report(venue, channel)
     res = NormalizeResult(checkpoint=report)
+    for kind, row in stream_crypto(venue, channel, records, report, levels=levels):
+        (res.books if kind == "book" else res.trades).append(row)
+    return res
+
+
+# Event kinds yielded by the streaming normalizers.
+BOOK = "book"
+TRADE = "trade"
+
+
+def stream_crypto(venue: str, channel: str, records: Iterable[Record], report: ckpt.CheckpointReport,
+                  levels: int = 10) -> Iterator[tuple[str, dict]]:
+    """Streaming core of :func:`normalize_crypto`: yield ``(kind, row)`` as replay proceeds.
+
+    ``kind`` is :data:`BOOK` or :data:`TRADE`. Rows and their order are IDENTICAL to what
+    ``normalize_crypto`` accumulates (the parity test asserts this), but nothing is retained here —
+    the caller flushes to parquet in bounded chunks. ``report`` is mutated in place with the
+    checkpoint-validation results (Kraken CRC / Bybit), exactly as before.
+    """
+    proc, _prime = make_processor(venue, channel)
+    prime = _PRIME.get(venue.lower())
     if proc is None:  # pragma: no cover - every crypto venue has a processor
-        return res
+        return
 
     primed = prime is None
     last_fp: tuple | None = None
@@ -129,14 +153,16 @@ def normalize_crypto(venue: str, channel: str, records: Iterable[Record],
             baseline_established = True
             pending_resync = False
             primed = True  # the persisted snapshot IS the baseline; no first-message priming needed
-            snap_id, last_fp = _emit_book(res, proc, levels, recv, None, venue, channel,
-                                          snap_id, last_fp, synced=True)
+            rows, snap_id, last_fp = _emit_book(proc, levels, recv, None, venue, channel,
+                                                snap_id, last_fp, synced=True)
+            for r in rows:
+                yield (BOOK, r)
             continue
 
         # 1) Trade tape (independent of the book processor).
         for t in extract.trade_rows(venue, channel, raw):
             t["recv_ts_ns"] = recv
-            res.trades.append(t)
+            yield (TRADE, t)
 
         # 2) Bybit checkpoint: compare reconstruction to a mid-stream snapshot BEFORE it resets.
         if venue.lower() == "bybit":
@@ -191,30 +217,33 @@ def normalize_crypto(venue: str, channel: str, records: Iterable[Record],
         # not a filter — rows are always kept, just marked.
         if do_emit and getattr(proc, "book", None) is not None:
             exch = extract.exch_ts_ns(venue, msg)
-            snap_id, last_fp = _emit_book(res, proc, levels, recv, exch, venue, channel,
-                                          snap_id, last_fp, synced=synced)
-    return res
+            rows, snap_id, last_fp = _emit_book(proc, levels, recv, exch, venue, channel,
+                                                snap_id, last_fp, synced=synced)
+            for r in rows:
+                yield (BOOK, r)
 
 
-def _emit_book(res: NormalizeResult, proc: Any, levels: int, recv: int, exch: int | None,
+def _emit_book(proc: Any, levels: int, recv: int, exch: int | None,
                venue: str, channel: str, snap_id: int, last_fp: tuple | None,
-               synced: bool) -> tuple[int, tuple | None]:
-    """Emit one top-N L2 snapshot iff the aggregated top-N changed; return ``(snap_id, last_fp)``.
+               synced: bool) -> tuple[list[dict], int, tuple | None]:
+    """One top-N L2 snapshot iff the aggregated top-N changed; return ``(rows, snap_id, last_fp)``.
 
     Shared by the normal delta path and the persisted-REST-snapshot path so both increment
-    ``snap_id`` and dedupe against ``last_fp`` identically (no divergent emit logic).
+    ``snap_id`` and dedupe against ``last_fp`` identically (no divergent emit logic). Returns a
+    SMALL (≤2·levels) row list the caller yields — never accumulates a whole run.
     """
     if getattr(proc, "book", None) is None:
-        return snap_id, last_fp
+        return [], snap_id, last_fp
     rows = extract.l2_levels(proc.book, levels)
     fp = extract.book_fingerprint(rows)
+    out: list[dict] = []
     if rows and fp != last_fp:
         last_fp = fp
         snap_id += 1
         for side, lvl, price, size in rows:
-            res.books.append(_book_row(recv, exch, venue, proc.product, channel,
-                                       snap_id, synced, side, lvl, price, size))
-    return snap_id, last_fp
+            out.append(_book_row(recv, exch, venue, proc.product, channel,
+                                 snap_id, synced, side, lvl, price, size))
+    return out, snap_id, last_fp
 
 
 def _book_row(recv: int, exch: int | None, venue: str, product: str, channel: str,
@@ -236,14 +265,28 @@ def normalize_kalshi(channel: str, records: Iterable[Record]) -> NormalizeResult
     Kalshi has no cross-book checkpoint oracle; the payload/seq schema is UNVERIFIED (1.1b), so we
     normalize exactly what we record. ``checkpoint`` is a deferred report.
     """
-    proc, _ = make_processor("kalshi", channel)
-    report = ckpt.CheckpointReport(
+    report = kalshi_report(channel)
+    res = NormalizeResult(checkpoint=report)
+    for kind, row in stream_kalshi(channel, records):
+        (res.books if kind == BOOK else res.trades).append(row)
+    return res
+
+
+def kalshi_report(channel: str) -> ckpt.CheckpointReport:
+    """The fixed deferred checkpoint report for a Kalshi feed (no cross-book oracle; 1.1b)."""
+    return ckpt.CheckpointReport(
         "kalshi", channel, ckpt.METHOD_DEFERRED,
         notes="Kalshi payload/seq schema UNVERIFIED (ROADMAP 1.1b); no cross-book checkpoint oracle",
     )
-    res = NormalizeResult(checkpoint=report)
+
+
+def stream_kalshi(channel: str, records: Iterable[Record]) -> Iterator[tuple[str, dict]]:
+    """Streaming core of :func:`normalize_kalshi`: yield ``(kind, row)`` without buffering.
+
+    Same rows/order as ``normalize_kalshi`` accumulates (parity test asserts it)."""
+    proc, _ = make_processor("kalshi", channel)
     if proc is None:  # pragma: no cover
-        return res
+        return
 
     last_fp: dict[str, tuple] = {}
     snap_id = 0
@@ -257,7 +300,7 @@ def normalize_kalshi(channel: str, records: Iterable[Record]) -> NormalizeResult
 
         for t in extract.trade_rows("kalshi", channel, raw):
             t["recv_ts_ns"] = recv
-            res.trades.append(t)
+            yield (TRADE, t)
 
         proc.process(raw, recv)
 
@@ -280,9 +323,8 @@ def normalize_kalshi(channel: str, records: Iterable[Record]) -> NormalizeResult
             last_fp[ticker] = fp
             snap_id += 1
             for side, lvl, price, size in rows:
-                res.books.append(_book_row(recv, None, "kalshi", ticker, channel,
-                                           snap_id, synced, side, lvl, price, size))
-    return res
+                yield (BOOK, _book_row(recv, None, "kalshi", ticker, channel,
+                                       snap_id, synced, side, lvl, price, size))
 
 
 def _kalshi_levels(book: dict) -> list[tuple[str, int, Decimal, Decimal]]:

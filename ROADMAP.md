@@ -127,8 +127,17 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   aggregate (SortedDict); top-N is now O(n), ~396× faster (≈9 s/hr vs ≈60 min/hr, synthetic). `self.orders`
   stays authoritative so Kraken CRC/time-priority is byte-identical. Review
   [REV-013](notes/reviews/REV-013-normalizer-levels-perf.md) (PASS). New dep `sortedcontainers`.
-  **240 tests pass.** The real-data end-to-end normalize re-run (true 2.1 acceptance on live data) is
-  queued now that it's fast enough.
+  *Real-data validation 2026-10-17:* a bounded 1 h slice normalized in 2.86 s / 174 MB on the box with
+  **Kraken 4080/4080 CRC checkpoints MATCH** (venue-anchored, non-circular) → L3→L2 reconstruction correct
+  on live data; valid books+settlements parquet produced.
+  *Streaming + atomic writes 2026-10-17 (the full day then OOM'd — buffered whole run in RAM, 7.5 GB):*
+  pipeline cores refactored into generators; `__main__` flushes to a `PartitionedParquetWriter` every
+  50k rows (peak RSS now flat ~4.4 MB regardless of run length vs the old linear growth). Each partition
+  is written ATOMICALLY (`part.parquet.tmp` → `os.replace` only on clean `close()`), so a crash/hard-kill
+  never leaves a glob-visible partial that `index/loader.py` could silently ingest. Byte-for-row parity
+  with the buffered path verified. Review [REV-014](notes/reviews/REV-014-normalizer-streaming-atomic.md)
+  (PASS; MEDIUM crash-atomicity raised→closed). **246 tests pass.** Next: re-run the full real day on the
+  box to confirm no OOM at scale (final 2.1-at-scale acceptance).
 - [x] **2.1a Replay/health fixes (surfaced by the live run 2026-10-17).** *Done 2026-10-17.*
   (a) **health: exclude the settlement batch dataset** (was reading 0% uptime). (b) **health: per-feed window
   from own first data** + a **cross-feed down-from-start gate** so a late window can't MASK a feed that was
