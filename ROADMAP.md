@@ -136,8 +136,13 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   is written ATOMICALLY (`part.parquet.tmp` → `os.replace` only on clean `close()`), so a crash/hard-kill
   never leaves a glob-visible partial that `index/loader.py` could silently ingest. Byte-for-row parity
   with the buffered path verified. Review [REV-014](notes/reviews/REV-014-normalizer-streaming-atomic.md)
-  (PASS; MEDIUM crash-atomicity raised→closed). **246 tests pass.** Next: re-run the full real day on the
-  box to confirm no OOM at scale (final 2.1-at-scale acceptance).
+  (PASS; MEDIUM crash-atomicity raised→closed). **246 tests pass.**
+  *At-scale acceptance PASSED 2026-10-17:* the full real day normalized on the 7.6 GB box in **4:26, peak
+  RSS ~201 MB (no OOM)**, producing **Kraken 284,171/284,171 CRC checkpoints MATCH** — L3→L2 reconstruction
+  correct on real multi-hour data, venue-anchored and non-circular. 40 MB clean parquet (Bitstamp 28.7 MB +
+  Kraken 12.7 MB books + settlements); zero leftover `.tmp` (atomic publish confirmed on a real run).
+  **2.1 is validated end-to-end on live data.** (Bitstamp book completeness still awaits its REST-baseline
+  persistence on the live feed — 1.1c/1.3; its CRC-less `deferred_rest_snapshot` path shows 0 checkpoints.)
 - [x] **2.1a Replay/health fixes (surfaced by the live run 2026-10-17).** *Done 2026-10-17.*
   (a) **health: exclude the settlement batch dataset** (was reading 0% uptime). (b) **health: per-feed window
   from own first data** + a **cross-feed down-from-start gate** so a late window can't MASK a feed that was
