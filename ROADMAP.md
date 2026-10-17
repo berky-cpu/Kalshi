@@ -174,10 +174,13 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   (isolated from `coinbase/{full,level3}`). Spec VERIFIED from docs.cdp.coinbase.com (2026-10-17) →
   feeds.md §5A + facts.md. Review [REV-015](notes/reviews/REV-015-roadmap-1.1d-coinbase-advanced.md)
   (PASS-with-caveats; F2/F3 fixed). **251 tests pass.**
-  **Acceptance NOT closed (F1):** the fixture is synthetic — the per-connection-`sequence_num` /
-  snapshot-on-resubscribe spec must be confirmed against a **live capture from the US box** before Coinbase
-  is counted (CLAUDE.md rule 4). Deploy to Ashburn → capture → replay closes it. *Until then the index runs
-  on 2 verified (Bitstamp + Kraken) + 1 provisional (Coinbase).* Owner: data-engineer.
+  **F1 CLOSED 2026-10-17 (live capture replayed clean):** deployed to Ashburn; the real capture confirms the
+  spec on the wire — `sequence_num` +1 contiguous across l2_data→subscriptions→l2_data with the in-stream
+  snapshot at seq 0 (40,872 levels / ~5 MiB), and the production normalizer replay gave 49,640 book rows,
+  `synced` all True, an uncrossed book (best_bid 81124.80 / best_ask 81124.81), 0 seq-gaps. **Coinbase is now
+  a verified 3rd BRTI constituent** → the index runs on 3 verified (Bitstamp + Kraken + Coinbase). Owner:
+  data-engineer. (Snapshot-on-*reconnect* will be exercised by natural 24/7 disconnects; no per-message CRC
+  oracle exists for Coinbase L2, so completeness is tracked via `synced` + the uncrossed-book/0-gap replay.)
   *Live-only bug found + fixed on first deploy 2026-10-17:* the level2 opening snapshot is one ~1.6 MiB /
   ~40k-level frame that exceeded the websockets default 1 MiB `max_size` → frame rejected → silent
   reconnect-loop, nothing recorded. Added `IoConfig.max_size` (default 2²⁰, byte-identical for all existing
