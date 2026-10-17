@@ -10,3 +10,8 @@ data/
 *.parquet
 *.jsonl.zst
 .claude/settings.local.json
+
+# Test fixtures are committed sample recordings; keep them tracked even though they live under a
+# data/ path and are *.jsonl.zst (both ignored above). Order matters: these negations come last.
+!tests/fixtures/**/
+!tests/fixtures/**
