@@ -58,10 +58,15 @@ class BybitOrderbookProcessor(MessageProcessor):
             self._reset_from_snapshot(data)
             self.synced = True
             self.needs_resnapshot = False  # snapshot IS the resync (in-band)
+            self.awaiting_snapshot = False  # the fresh snapshot landed
             self.last_u = _int_or_none(u)
             return [{"kind": "snapshot"}]
 
         if mtype == "delta":
+            if self.awaiting_snapshot:
+                # We resubscribed and are waiting for the fresh snapshot: drop pre-snapshot
+                # deltas WITHOUT re-arming resync (no resubscribe-frame thrash).
+                return []
             if not self.synced:
                 # Delta with no book (before first snapshot / after a reset) — a real gap.
                 self._emit_gap("delta before snapshot", recv_ts_ns, got=u)
@@ -84,10 +89,23 @@ class BybitOrderbookProcessor(MessageProcessor):
         for p, q in data.get("a", []):
             self.book.set(ASK, p, q)
 
+    def begin_resync(self) -> None:
+        """Enter resync mode before the resubscribe-triggered snapshot arrives.
+
+        Clearing the book (and dropping ``synced``) means the fresh ``type:"snapshot"`` frame is
+        treated as the expected in-band rebuild — NOT logged as a spurious "snapshot reset" gap.
+        ``awaiting_snapshot`` suppresses pre-snapshot deltas so they do NOT re-arm ``needs_resnapshot``
+        and spam resubscribe frames (feeds.md §5: ≤500 connections/5 min) until the snapshot lands.
+        """
+        self.synced = False
+        self.book.clear()
+        self.awaiting_snapshot = True
+
     def apply_snapshot(self, snapshot: Any, recv_ts_ns: int | None = None) -> None:
         """Bybit resyncs in-band; on reconnect we just mark 'await snapshot'."""
         self.synced = False
         self.needs_resnapshot = False
+        self.awaiting_snapshot = True
         self.book.clear()
 
 
@@ -138,6 +156,18 @@ def _int_or_none(x: Any) -> int | None:
 def subscribe_messages(product: str = "BTCUSDT", depth: int = 50) -> list[dict]:
     return [{"req_id": "kbtc", "op": "subscribe",
              "args": [f"orderbook.{depth}.{product}", f"publicTrade.{product}"]}]
+
+
+def resubscribe_messages(product: str = "BTCUSDT", depth: int = 50) -> list[dict]:
+    """Frames that force a fresh orderbook ``type:"snapshot"`` (feeds.md §5).
+
+    A resubscribe (unsubscribe then subscribe) to the orderbook topic makes Bybit re-push a
+    snapshot first, which resets/rebuilds the book. Only the orderbook topic needs this — the
+    trade tape has no book to rebuild.
+    """
+    topic = f"orderbook.{depth}.{product}"
+    return [{"op": "unsubscribe", "args": [topic]},
+            {"req_id": "kbtc-resync", "op": "subscribe", "args": [topic]}]
 
 
 def io_config(product: str = "BTCUSDT", depth: int = 50) -> IoConfig:

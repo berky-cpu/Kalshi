@@ -279,6 +279,11 @@ class MessageProcessor(ABC):
         self.gaps: list[GapDetected] = []
         self.needs_resnapshot = False
         self.synced = False
+        # In-band resync (Kraken/Bybit/Kalshi): True between sending a resubscribe and the fresh
+        # snapshot landing. While set, the processor DROPS pre-snapshot frames instead of
+        # re-arming ``needs_resnapshot`` — otherwise the IO loop would re-fire resync on every
+        # pre-snapshot delta and spam resubscribe frames (Kraken Cloudflare ~150/10 min cap).
+        self.awaiting_snapshot = False
 
     def _emit_gap(
         self, reason: str, recv_ts_ns: int, expected: Any = None, got: Any = None
@@ -300,6 +305,25 @@ class MessageProcessor(ABC):
 
     def clear_resnapshot(self) -> None:
         self.needs_resnapshot = False
+
+    def begin_resync(self) -> None:
+        """Enter resync mode before a fresh snapshot is applied.
+
+        Called by the resyncer (see ``recorders/resync.py``) just before it fetches a REST
+        snapshot or sends an in-band resubscribe. The default flips ``synced`` off.
+
+        IMPORTANT (how stale frames are actually discarded): in the live loop
+        (:func:`run_recorder`) the socket read is *suspended* while the REST fetch awaits, so no
+        frames are fed to ``process()`` during the fetch — the ``_pending``/``_buffer`` replay
+        inside :meth:`apply_snapshot` is therefore the INITIAL-SYNC / offline-replay path, NOT
+        the live-resync discard. The real live-resync discard is the **post-snapshot live-path
+        guard** each REST venue runs on the frames that arrive *after* ``apply_snapshot``:
+        Coinbase drops ``sequence <= snapshot sequence``; Binance drops ``u < lastUpdateId`` and
+        gates the first event on ``U <= lastUpdateId <= u``; Bitstamp drops events whose
+        ``microtimestamp <= snapshot microtimestamp``. Venues that resync in-band override this
+        to also clear the book and set ``awaiting_snapshot`` (Kraken/Bybit/Kalshi).
+        """
+        self.synced = False
 
     @abstractmethod
     def process(self, raw: Any, recv_ts_ns: int) -> list[dict]:
@@ -330,7 +354,7 @@ async def run_recorder(  # pragma: no cover - requires a live socket
     config: IoConfig,
     processors: MessageProcessor | list[MessageProcessor],
     writer: Any,
-    resnapshot,
+    resync_builder,
     *,
     backoff: BackoffPolicy | None = None,
     stop_event=None,
@@ -343,13 +367,19 @@ async def run_recorder(  # pragma: no cover - requires a live socket
     frames it doesn't handle. Only a processor with ``resync_on_gap`` that raises
     ``needs_resnapshot`` triggers ``resnapshot(processor)`` — trade/tape processors only log.
 
-    ``writer`` is a ``RotatingZstdWriter``. ``resnapshot`` is an async callable
-    ``resnapshot(processor) -> None`` that fetches a fresh snapshot (REST or in-band) and
-    applies it. ``stop_event`` is an ``asyncio.Event`` for graceful shutdown; on exit the
-    caller must ``writer.close()`` to flush the final zstd frame.
+    ``writer`` is a ``RotatingZstdWriter``. ``resync_builder`` is a callable
+    ``resync_builder(send) -> resnapshot`` where ``send`` is an async ``send(payload: str)``
+    bound to the live socket and ``resnapshot`` is an async ``resnapshot(processor) -> None``.
+    Binding ``send`` here is what lets an in-band resyncer (Kraken/Bybit/Kalshi) push a
+    resubscribe frame over *this* connection; REST resyncers (Coinbase/Binance/Bitstamp) ignore
+    ``send`` and fetch over HTTP. See ``recorders/resync.py`` for the injectable seams (a FAKE
+    ``send``/``fetch`` drives the unit tests with no socket). ``stop_event`` is an
+    ``asyncio.Event`` for graceful shutdown; on exit the caller must ``writer.close()`` to flush
+    the final zstd frame.
 
     Not exercised by unit tests (needs a live venue); the gap→resnapshot *decision* it relies
-    on lives entirely in the pure processors, which ARE tested.
+    on, and the resync re-anchoring itself, live in the pure processors + resyncers, which ARE
+    tested.
     """
     import asyncio
     import json
@@ -367,6 +397,11 @@ async def run_recorder(  # pragma: no cover - requires a live socket
                     await ws.send(json.dumps(msg))
                 attempt = 0  # connected cleanly; reset backoff
 
+                async def _send(payload: str) -> None:
+                    await ws.send(payload)
+
+                resnapshot = resync_builder(_send)  # bind the resyncer to this connection
+
                 async def _heartbeat() -> None:
                     if not (config.ping_message and config.ping_interval_s):
                         return
@@ -375,10 +410,15 @@ async def run_recorder(  # pragma: no cover - requires a live socket
                         await ws.send(config.ping_message)
 
                 hb = asyncio.create_task(_heartbeat())
-                # Fresh snapshot on (re)connect so every book processor starts valid.
-                for p in procs:
-                    if p.resync_on_gap:
-                        await resnapshot(p)
+                # On (re)connect, REST-snapshot venues (Coinbase/Binance/Bitstamp) MUST fetch the
+                # initial book over HTTP. In-band venues (Kraken/Bybit/Kalshi) already received a
+                # snapshot from ``config.subscribe_messages`` above, so we must NOT also fire the
+                # resubscribe resyncer here — that would open a SECOND subscription and
+                # double-apply deltas. ``resync_on_connect`` makes this correct-by-construction.
+                if getattr(resnapshot, "resync_on_connect", True):
+                    for p in procs:
+                        if p.resync_on_gap:
+                            await resnapshot(p)
                 try:
                     async for raw in ws:
                         recv = now_ns()  # stamp BEFORE parsing (CLAUDE.md convention)

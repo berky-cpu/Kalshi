@@ -45,11 +45,21 @@ class KrakenProcessor(MessageProcessor):
         self.depth = depth
         self.book = OrderIdBook()
 
+    def begin_resync(self) -> None:
+        """In-band resync: drop ``synced`` and set ``awaiting_snapshot`` so checksum-failing
+        updates arriving before the resubscribe snapshot do NOT re-arm resync (no frame thrash
+        against Kraken's ~150-reconnect/10-min cap)."""
+        self.synced = False
+        self.awaiting_snapshot = True
+
     def process(self, raw: Any, recv_ts_ns: int) -> list[dict]:
         msg = as_dict(raw)
         if not isinstance(msg, dict) or msg.get("channel") != "level3":
             return []  # heartbeat / status / subscribe-ack frames
         mtype = msg.get("type")
+        # Suppress pre-snapshot updates after a resubscribe: only the fresh snapshot resyncs.
+        if self.awaiting_snapshot and mtype != "snapshot":
+            return []
         data = msg.get("data") or []
         events: list[dict] = []
         for entry in data:
@@ -72,6 +82,7 @@ class KrakenProcessor(MessageProcessor):
         for o in entry.get("asks", []):
             self.book.add(str(o["order_id"]), ASK, o["limit_price"], o["order_qty"])
         self.synced = True
+        self.awaiting_snapshot = False  # the fresh snapshot landed; resume normal checks
 
     def _apply_update_entry(self, entry: dict) -> None:
         for side, label in ((entry.get("bids", []), BID), (entry.get("asks", []), ASK)):
@@ -120,6 +131,25 @@ def subscribe_messages(product: str = "BTC/USD", depth: int = 10,
                    "snapshot": True, "token": token},
         "req_id": 1,
     }]
+
+
+def unsubscribe_messages(product: str = "BTC/USD", *, token: str) -> list[dict]:
+    return [{
+        "method": "unsubscribe",
+        "params": {"channel": "level3", "symbol": [product], "token": token},
+    }]
+
+
+def resubscribe_messages(product: str = "BTC/USD", depth: int = 10, *, token: str) -> list[dict]:
+    """Frames that pull a fresh ``type:"snapshot"`` (resync on checksum mismatch / disconnect).
+
+    feeds.md §2: unsubscribe then resubscribe with ``snapshot: true``; the fresh snapshot frame
+    then rebuilds the book via the processor's normal ``process`` path (resync PARTIAL — Kraken
+    does not name this as a procedure, it is inferred from the checksum-mismatch behaviour).
+    ``token`` is REQUIRED (no placeholder) so a mis-wire fails loudly rather than gapping forever.
+    """
+    return [*unsubscribe_messages(product, token=token),
+            *subscribe_messages(product, depth, token)]
 
 
 def io_config(product: str = "BTC/USD", depth: int = 10, token: str = "<token>") -> IoConfig:
