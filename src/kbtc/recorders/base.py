@@ -241,8 +241,10 @@ def kraken_crc32(book: OrderIdBook, top_levels: int = 10) -> int:
     Asks are taken price-ascending, bids price-descending; within a level the orders are in
     queue (insertion) order; each order contributes ``price`` then ``qty`` with the decimal
     point removed and leading zeros stripped, using the venue's *transmitted* strings. Result
-    is cast to unsigned 32-bit. (feeds.md §2; worked-example result 1063832831 is not
-    reproducible here because feeds.md does not give that example's input orders — UNVERIFIED.)
+    is cast to unsigned 32-bit. (feeds.md §2.) VERIFIED against Kraken's published L3-guide worked
+    example: the real 21-bid/14-ask input reproduces checksum 1063832831 — asserted by
+    ``tests/test_recorders_kraken.py::test_kraken_crc32_matches_official_worked_example`` (and
+    re-exercised through the normalizer emit path in ``tests/test_normalize_books.py``).
     """
     parts: list[str] = []
     for side, reverse in ((ASK, False), (BID, True)):
