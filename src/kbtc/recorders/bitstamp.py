@@ -1,23 +1,22 @@
 """Bitstamp `live_orders_{pair}` recorder (BRTI constituent).
 
-feeds.md §3. Order-by-order book keyed by order id. Events: ``order_created`` /
-``order_changed`` / ``order_deleted`` with ``order_type`` (0 = buy, 1 = sell), ``price``,
-``amount``, ``microtimestamp`` (monotonic per channel), ``id``.
+feeds.md §3 (endpoint, subscribe envelope, and gap mechanism VERIFIED from the primary Bitstamp
+WebSocket v2 doc, 2026-10-16). Order-by-order book keyed by order id. Events: ``order_created`` /
+``order_changed`` / ``order_deleted``, each a frame with top-level ``event``, ``channel``,
+``event_id`` (UUID string), ``pre_event_id`` (UUID string), and ``data`` {id, id_str,
+order_type (0 = buy, 1 = sell), datetime, microtimestamp, amount, amount_str, amount_at_create,
+amount_traded, price, price_str, order_source}.
 
-Gap handling (feeds.md §3): the ONLY live-stream gap signal is ``microtimestamp`` monotonicity
-— feeds.md §3 says ``microtimestamp`` is monotonic per channel and that MarketEventID is the
-REST-backfill ``since_id`` key; it does NOT say event ids increment by 1. So by default we run
-only the ``microtimestamp``-regression check and leave MarketEventID purely as the backfill key.
+**Gap detection (VERIFIED): the `pre_event_id` → `event_id` chain.** Each new event's
+``pre_event_id`` must equal the previous event's ``event_id`` (exactly analogous to Binance
+futures ``pu == prev.u``); a mismatch means a dropped event → resync. ``microtimestamp`` is kept
+as a secondary monotonic-ordering sanity check (a regression still logs a gap), but the chain is
+the primary signal. Resync path: REST order-book seed + ``POST /api/v2/order_data/`` ``since_id``
+(MarketEventID) backfill.
 
-An OPTIONAL +1-contiguity check on a MarketEventID field is available but **disabled by default**
-(``event_id_field=None``): the WS v2 page is Incapsula-blocked, so the live field name carrying
-the MarketEventID is unconfirmed AND it is unknown whether those ids are contiguous. Do not
-enable it until both are confirmed — otherwise, pointing it at ``microtimestamp`` (a microsecond
-clock, not a +1 counter) would fire a false gap on every message.
-
-Everything below the "VERIFIED from REST primary" line (endpoint host, subscribe envelope,
-event-id field name) is PARTIAL — see the UNVERIFIED markers — and is kept as configurable
-constants so a corrected value needs no rewrite.
+NOTE: the ``microtimestamp``-sequenced "discard buffered events older than the snapshot" behaviour
+belongs to the SEPARATE ``detail/diff_order_book`` channel — NOT ``live_orders`` — do not conflate.
+``live_orders`` has no snapshot message; seed the book from the REST order book.
 """
 from __future__ import annotations
 
@@ -25,17 +24,10 @@ from typing import Any
 
 from .base import ASK, BID, IoConfig, MessageProcessor, OrderIdBook, as_dict
 
-# --- CONFIGURABLE / UNVERIFIED (ROADMAP 0.4 open item F-1) --------------------------
-ENDPOINT = "wss://ws.bitstamp.net"  # UNVERIFIED (ROADMAP 0.4 open item): WS v2 page bot-walled
-SUBSCRIBE_EVENT = "bts:subscribe"  # UNVERIFIED (ROADMAP 0.4 open item): envelope from mirror
-UNSUBSCRIBE_EVENT = "bts:unsubscribe"  # UNVERIFIED (ROADMAP 0.4 open item)
-# Optional WS field carrying the MarketEventID, for +1-contiguity gap detection. DISABLED by
-# default (None): the REST backfill key is VERIFIED but the live WS field *name* is not (blocked
-# page), nor is it known whether those ids are contiguous. Set to the real field name ONLY after
-# both are confirmed. NEVER set this to "microtimestamp" — that is a microsecond clock, not a
-# +1 counter, and would false-fire a gap on every message.
-EVENT_ID_FIELD: str | None = None  # UNVERIFIED (ROADMAP 0.4 open item): keep disabled
-# -----------------------------------------------------------------------------------
+ENDPOINT = "wss://ws.bitstamp.net"  # VERIFIED 2026-10-16 (Bitstamp WS v2 doc)
+SUBSCRIBE_EVENT = "bts:subscribe"  # VERIFIED 2026-10-16
+UNSUBSCRIBE_EVENT = "bts:unsubscribe"  # VERIFIED 2026-10-16
+MAX_CHANNELS_PER_CONNECTION = 1024  # VERIFIED 2026-10-16
 
 REST_ORDER_BOOK = "https://www.bitstamp.net/api/v2/order_book/{pair}/"  # seed (group=2 detail)
 REST_ORDER_DATA = "https://www.bitstamp.net/api/v2/order_data/"  # since_id backfill (VERIFIED)
@@ -46,27 +38,25 @@ _EVENTS = {"order_created", "order_changed", "order_deleted"}
 class BitstampProcessor(MessageProcessor):
     venue = "bitstamp"
 
-    def __init__(self, product: str = "btcusd", channel: str | None = None,
-                 event_id_field: str | None = EVENT_ID_FIELD, **kw: Any) -> None:
+    def __init__(self, product: str = "btcusd", channel: str | None = None, **kw: Any) -> None:
         channel = channel or f"live_orders_{product}"
         super().__init__(product=product, channel=channel, **kw)
         self.book = OrderIdBook()
-        self.event_id_field = event_id_field
-        self.last_microtimestamp: int | None = None
-        self.last_event_id: int | None = None
+        self.last_event_id: str | None = None  # primary chain anchor (UUID string)
+        self.last_microtimestamp: int | None = None  # secondary ordering sanity check
 
     def apply_snapshot(self, snapshot: Any, recv_ts_ns: int | None = None) -> None:
         """Seed from the REST detail order book: {"bids":[[price,amount,order_id],...], "asks":...}."""
         snap = as_dict(snapshot)
         self.book.clear()
         for row in snap.get("bids", []):
-            px, amt, oid = row[0], row[1], row[2]
-            self.book.add(str(oid), BID, px, amt)
+            self.book.add(str(row[2]), BID, row[0], row[1])
         for row in snap.get("asks", []):
-            px, amt, oid = row[0], row[1], row[2]
-            self.book.add(str(oid), ASK, px, amt)
+            self.book.add(str(row[2]), ASK, row[0], row[1])
         self.synced = True
         self.needs_resnapshot = False
+        # A fresh snapshot breaks the old chain; re-anchor on the next live event.
+        self.last_event_id = None
 
     def process(self, raw: Any, recv_ts_ns: int) -> list[dict]:
         msg = as_dict(raw)
@@ -80,23 +70,34 @@ class BitstampProcessor(MessageProcessor):
         if event not in _EVENTS:
             return []  # subscription-succeeded / heartbeat frames
         data = msg.get("data") or {}
+        event_id = msg.get("event_id")
+        pre_event_id = msg.get("pre_event_id")
 
-        # --- gap / ordering checks (never silent) ---
+        # --- PRIMARY gap signal: pre_event_id must chain off the previous event_id ---
+        chain_broke = False
+        if self.last_event_id is not None:
+            if pre_event_id is None:
+                # Once anchored, a missing pre_event_id can't be verified -> treat as a gap
+                # rather than silently re-anchoring (the doc says it's always present).
+                self._emit_gap("missing pre_event_id", recv_ts_ns,
+                               expected=self.last_event_id, got=None)
+                chain_broke = True
+            elif pre_event_id != self.last_event_id:
+                self._emit_gap("event_id chain break", recv_ts_ns,
+                               expected=self.last_event_id, got=pre_event_id)
+                chain_broke = True
+        if event_id is not None:
+            self.last_event_id = event_id  # re-anchor (seeds on first event)
+
+        # --- SECONDARY: microtimestamp monotonic sanity check. Only run when the chain check
+        # didn't already flag this event, so one dropped event logs at most one gap. ---
         micro = _int_or_none(data.get("microtimestamp"))
-        if micro is not None and self.last_microtimestamp is not None and micro < self.last_microtimestamp:
+        if (not chain_broke and micro is not None and self.last_microtimestamp is not None
+                and micro < self.last_microtimestamp):
             self._emit_gap("microtimestamp regression", recv_ts_ns,
                            expected=f">{self.last_microtimestamp}", got=micro)
-            return []
         if micro is not None:
             self.last_microtimestamp = micro
-
-        eid = _hex_or_int(data.get(self.event_id_field)) if self.event_id_field else None
-        if eid is not None and self.last_event_id is not None and eid != self.last_event_id + 1:
-            self._emit_gap("MarketEventID skip", recv_ts_ns,
-                           expected=self.last_event_id + 1, got=eid)
-            # fall through: still record latest id so we don't re-fire every message post-gap
-        if eid is not None:
-            self.last_event_id = eid
 
         self._apply(event, data)
         return [{"kind": "book", "event": event}]
@@ -119,24 +120,6 @@ def _int_or_none(x: Any) -> int | None:
         return None
 
 
-def _hex_or_int(x: Any) -> int | None:
-    """MarketEventID is a hex id; microtimestamp is decimal. Accept either."""
-    if x is None:
-        return None
-    if isinstance(x, int):
-        return x
-    s = str(x).strip()
-    if s.startswith(("0x", "0X")) or any(c in "abcdefABCDEF" for c in s):
-        try:
-            return int(s, 16)
-        except ValueError:
-            return None
-    try:
-        return int(s, 10)
-    except ValueError:
-        return None
-
-
 def subscribe_messages(product: str = "btcusd") -> list[dict]:
     return [{"event": SUBSCRIBE_EVENT, "data": {"channel": f"live_orders_{product}"}}]
 
@@ -147,5 +130,5 @@ def io_config(product: str = "btcusd") -> IoConfig:
         channel=f"live_orders_{product}",
         urls=[ENDPOINT],
         subscribe_messages=subscribe_messages(product),
-        ping_interval_s=None,  # heartbeat/limits UNVERIFIED (feeds.md §3)
+        ping_interval_s=None,  # heartbeat/limits beyond 1024 channels/conn not needed here
     )

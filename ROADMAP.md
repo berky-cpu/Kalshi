@@ -53,12 +53,15 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   Kraken CRC32 externally validated vs the documented example (`1063832831`). **Kalshi split to 1.1b.**
   *Open (→ later integration):* the actual resync FETCH (REST/in-band snapshot) is stubbed/untested (F8);
   Bitstamp endpoint/envelope + Binance stream speeds/aggTrade stay PARTIAL pending a human fetch (0.4 open items).
-- [ ] **1.1b Kalshi WS adapter — finalize.** `docs/feeds.md`/0.4 never specced Kalshi's own feed; the
-  adapter (`recorders/kalshi.py`) ships with endpoints/auth/subscribe/frame VERIFIED but the KXBTC15M
-  **payload schema** (yes/no vs bid/ask; cents-int vs dollar-string) and **seq gap semantics** UNVERIFIED
-  (the `docs.kalshi.com/websockets` reference 404'd 2026-10-16). *Accept:* verify payload + seq against the
-  Kalshi WS reference (human/authenticated fetch), replace the synthetic fixture with a captured real frame,
-  record in `docs/feeds.md` + `docs/facts.md`, red-team sign-off. Owner: data-engineer.
+- [ ] **1.1b Kalshi WS adapter — finalize.** Quick-start WS doc (human fetch, 2026-10-16) VERIFIED the
+  connection layer: prod/legacy/demo endpoints, auth headers + signing string, subscribe
+  `{id,cmd,params:{channels,market_tickers}}`, unsubscribe via `sids`, message types, reconnect+keepalive
+  — all match `recorders/kalshi.py`. **Still UNVERIFIED** (the quick-start lacks it; needs the dedicated
+  **channel-reference** page, not the quick-start): the `orderbook_delta`/`orderbook_snapshot` **payload
+  schema** (yes/no vs bid/ask; price format — note ticker uses `_dollars` strings) and the **seq gap
+  semantics** (quick-start shows no top-level `seq`). *Accept:* verify payload + seq from the channel
+  reference, replace the synthetic fixture with a captured real frame, record in `docs/feeds.md` +
+  `docs/facts.md`, red-team sign-off. Owner: data-engineer.
 - [x] **1.2** Settlement capture: record every KXBTC15M market's final result and settlement value.
   *Done 2026-10-16:* `src/kbtc/recorders/settlement.py` + tests (78 pass). Review
   [REV-006](notes/reviews/REV-006-roadmap-1.2-settlement.md) (FAIL→PASS, Round 2). Kalshi REST

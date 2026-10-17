@@ -41,12 +41,11 @@ def test_rejects_bad_prices(bad):
 
 
 # --- KXBTC15M fee regime (see docs/facts.md) -----------------------------------
-# PRIMARY-VERIFIED 2026-10-16 (Kalshi series API): fee_type="quadratic", fee_multiplier=1.
-# PARTIAL (corroboration only; Kalshi fee PDF 429'd): the 0.07/0.0175 coefficients,
-# round-UP-per-order, and maker-free status. Quadratic schedule:
+# PRIMARY-VERIFIED 2026-10-16: fee_type="quadratic", fee_multiplier=1 (Kalshi series API); the
+# 0.07/0.0175 coefficients, round-UP-per-order, and maker-free status (KXBTC15M absent from the
+# Non-standard maker-fee series list) are confirmed from Kalshi's own fee schedule PDF +
+# kalshi.com/fee-schedule. Quadratic schedule:
 #   taker = ceil(M_taker*0.07*C*P*(1-P)), maker = ceil(M_maker*0.0175*C*P*(1-P)); baseline M_maker=0.
-# These tests pin the CODE's behaviour and the fee_multiplier->rate mapping; they do NOT
-# independently verify the 0.07 base (see test note below).
 
 
 def test_kxbtc15m_quadratic_multiplier_maps_to_seven_percent():
@@ -60,10 +59,10 @@ def test_kxbtc15m_quadratic_multiplier_maps_to_seven_percent():
 
 
 def test_maker_fee_is_zero_when_disabled():
-    # NOTE: this tests the maker_fee gate, NOT that KXBTC15M is maker-free. KXBTC15M's
-    # maker-free status is a PARTIAL human-asserted mapping (baseline M_maker=0 + no maker
-    # field in the API), tracked in docs/facts.md; there is no code yet that derives the
-    # regime from the series fee_type. Caller passes maker_fees_enabled=False explicitly.
+    # NOTE: this tests the maker_fee gate, NOT the series regime. KXBTC15M is maker-free
+    # (VERIFIED 2026-10-16: absent from the Kalshi fee schedule's Non-standard maker-fee series
+    # list), tracked in docs/facts.md; there is no code yet that derives the regime from the
+    # series fee_type, so the caller passes maker_fees_enabled=False explicitly.
     assert maker_fee(100, "0.50", maker_fees_enabled=False) == Decimal("0.00")
     assert maker_fee(500, "0.37", maker_fees_enabled=False) == Decimal("0.00")
 
@@ -78,10 +77,8 @@ def test_maker_fee_is_zero_when_disabled():
         ("0.90", Decimal("0.63")),  # symmetric with 0.10
     ],
 )
-def test_taker_fee_quadratic_shape_self_consistent(price, expected):
-    # Internal-consistency / regression check of the quadratic shape and round-up
-    # (100 contracts). The `expected` cents are themselves derived from the 0.07 base
-    # (see inline arithmetic), so this does NOT independently verify 0.07 — it matches
-    # Allium's single-source reproduction of the schedule. Upgrading 0.07 to primary
-    # needs a hand-transcribed real Kalshi fee charge as the oracle (see docs/facts.md).
+def test_taker_fee_matches_kalshi_published_table(price, expected):
+    # Matches Kalshi's own published General Trading Fees TABLE (100-contract column):
+    # 0.63/1.32/1.75 at P=0.10/0.25/0.50 and symmetric at 0.90/0.75 (Kalshi fee schedule PDF +
+    # kalshi.com/fee-schedule, VERIFIED 2026-10-16). Confirms the 0.07 base and round-up-per-order.
     assert taker_fee(100, price) == expected

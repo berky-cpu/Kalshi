@@ -21,22 +21,20 @@ Anything not in this table is UNVERIFIED.
 | `fee_type` | **"quadratic"** | Kalshi series API `https://api.elections.kalshi.com/trade-api/v2/series/KXBTC15M` (`"fee_type": "quadratic"`) | 2026-10-16 | quant-modeler |
 | `fee_multiplier` (M_taker) | **1** (dimensionless scalar on the base rate, NOT a bp value or the rate itself) | Kalshi series API, same endpoint (`"fee_multiplier": 1`) | 2026-10-16 | quant-modeler |
 | Market-level fee fields | **None** — fees are series-level; no `fee_type`/maker field on the market object | Kalshi markets API `?series_ticker=KXBTC15M` (absence confirmed) | 2026-10-16 | quant-modeler |
-| Taker formula & rate | `round_up_to_cent(M_taker · 0.07 · C · P · (1−P))` → KXBTC15M taker rate = 1 · 0.07 = **0.07**. **PARTIAL (single-source corroboration):** the 0.07 base, round-UP, and C·P·(1−P) shape are quoted by Allium's fee docs, and Allium's own worked table (100 contracts → 0.63/1.32/1.75/1.32/0.63 at P=0.10/0.25/0.50/0.75/0.90) is internally self-consistent with the 0.07 formula — but the formula and the table come from the **same third party (Allium)**, so this is one source, not independent corroboration. Kalshi's own fee-schedule PDF could **not** be fetched on 2026-10-16 (HTTP 429 / JS app-shell), so primary access is unconfirmed. | `https://docs.allium.so/historical-data/predictions/kalshi/series-fee-changes.md`; `https://allium.so/blog/kalshi-fees-why-the-cost-peaks-near-50-cents/`; cross-check vs. Kalshi API `fee_type`/`fee_multiplier` | 2026-10-16 | quant-modeler |
-| Maker formula & rate | `round_up_to_cent(M_maker · 0.0175 · C · P · (1−P))`; baseline M_maker = 0. **PARTIAL (corroboration)**, same PDF-access caveat as above. | Allium fee docs (same URLs) | 2026-10-16 | quant-modeler |
-| Rounding | Round **UP** to the next whole cent, **per order**. **PARTIAL** — round-up corroborated; per-order (vs per-fill) wording not re-read from the primary PDF. | Allium blog ("rounds the calculated fee up to the next whole cent") | 2026-10-16 | quant-modeler |
-| KXBTC15M maker regime | **MAKER-FREE** (treated as such). **PARTIAL** — inferred from baseline M_maker=0 and the absence of any maker-fee field in the series/market JSON; the authoritative live maker-fee series list is on `kalshi.com/fee-schedule`, which could not be fetched on 2026-10-16. | Kalshi series/market API (absence) + baseline schedule | 2026-10-16 | quant-modeler |
+| Taker formula & rate | `round_up(M · 0.07 · C · P · (1−P))` → KXBTC15M taker rate = 1 · 0.07 = **0.07**. **VERIFIED (primary) 2026-10-16** from Kalshi's own fee schedule (PDF + page, human fetch): formula verbatim `fees = round up(M x 0.07 x C x P x (1-P))`, `M` default 1; and Kalshi's General Trading Fees table matches our values (100 contracts → 0.07/0.63/1.32/1.75 at P=0.01/0.10/0.25/0.50). | Kalshi fee PDF (`kalshi-fee-schedule.pdf`) + `https://kalshi.com/fee-schedule` | 2026-10-16 | quant-modeler + Berk (fetch) |
+| Maker formula & rate | `round_up(M · 0.0175 · C · P · (1−P))`, `M` default **0** unless the series is flagged. **VERIFIED (primary)** — formula verbatim in the fee PDF; maker series show $0.02–$0.44 / 100 contracts (= 0.0175 rate). | Kalshi fee PDF + page | 2026-10-16 | quant-modeler + Berk (fetch) |
+| Rounding | Round **UP to the next whole cent**, per order. **VERIFIED-with-nuance (table-reconciled):** the PDF formula text literally says "rounds up … to a centicent" ($0.0001), but Kalshi's own General Trading Fees TABLE rounds the 1-contract fee to a whole cent ($0.01/$0.02…), so the effective granularity is a **cent** — a reconciliation from the table, not a verbatim quote. `fees.py` `ROUND_CEILING` to $0.01 matches the table and is strictly conservative (never under-states cost). | Kalshi fee PDF (General Trading Fees Table) | 2026-10-16 | quant-modeler + Berk (fetch) |
+| KXBTC15M maker regime | **MAKER-FREE. VERIFIED (primary)** — on `kalshi.com/fee-schedule`, "Most markets" (multiplier 1) carry only taker fees; the Non-standard (maker-fee) series list is alphabetical and runs KXBALLONDOR → KXBTCMAX125 with **no KXBTC15M in between** (exactly where it would sort), so KXBTC15M is not a maker-fee series. | `https://kalshi.com/fee-schedule` (Standard + Non-standard fee tables, human fetch) | 2026-10-16 | quant-modeler + Berk (fetch) |
 | Caps / minimums / crypto-specific fee | **None found** (UNVERIFIED-as-absent, not asserted) | — | 2026-10-16 | quant-modeler |
 
 ### Fee verification notes
-- The API fields (`fee_type="quadratic"`, `fee_multiplier=1`) are **primary-VERIFIED** (Kalshi's own API).
-  The 0.07/0.0175 coefficients, round-up, and per-order application rest on **single-source (Allium)
-  corroboration only** — the formula and Allium's worked table come from the same third party, so they
-  are self-consistent, not independently cross-checked. Kalshi's primary fee-schedule PDF
-  (`kalshi.com/fee-schedule`, `kalshi.com/docs/kalshi-fee-schedule.pdf`) returned HTTP 429 to WebFetch and
-  a JS app-shell to curl on 2026-10-16. **To upgrade to primary-VERIFIED:** a human/authenticated fetch of
-  the Kalshi fee PDF (or a hand-transcribed real Kalshi fee charge used as an independent test oracle)
-  should confirm the 0.07/0.0175, round-UP-per-order, and that KXBTC15M is not on the maker-fee series
-  list. `fees.py` and `tests/test_fees.py` retain PARTIAL tags until then.
+- **Upgraded to primary-VERIFIED 2026-10-16** (Berk fetched Kalshi's own fee schedule, which 429'd for
+  agents). The earlier single-source (Allium) corroboration is now confirmed by Kalshi's primary PDF +
+  `kalshi.com/fee-schedule`: taker `round up(M·0.07·C·P·(1−P))`, maker `round up(M·0.0175·C·P·(1−P))`
+  (M default 1 taker / 0 maker), fee table rounds to a whole cent, and KXBTC15M is NOT on the maker-fee
+  series list. `fees.py` values were already correct; PARTIAL tags there can be dropped.
+- Nuance: the PDF formula text says round "to a centicent", but Kalshi's own fee TABLE shows whole-cent
+  1-contract fees ($0.01/$0.02), so the effective rounding is a cent — matching our implementation.
 - `fee_multiplier` is M_taker (a scalar on the fixed 0.07 base); `fees.py` exposes `effective_taker_rate(m)=m·0.07`.
 
 ## BRTI methodology (ROADMAP 0.3)
@@ -53,7 +51,7 @@ Agent = primary source). Red-team independently re-fetched and confirmed the VER
 | Dissemination cadence | **Standard 1 Hz top-of-second**; max 200 ms on request; precision **$0.01** | Methodology v17.0 §7 | 2026-10-16 | index-replicator |
 | Aggregation | Order-book based, **no per-venue weight**: consolidate all venues → cap per level at `C_T` → uncross → bid/ask/mid price-volume curves on dynamic spacing `s_T` → utilized depth `v_T` (mid-spread ≤ **D=0.5%**) → exponentially depth-weighted mean of mid PV curve | Methodology v17.0 §4.1.1–4.1.2, Eq. 1a–3; §6.1/§6.2 | 2026-10-16 | index-replicator |
 | Contingency filters | Drop stale venue (>10 s); drop erroneous book (unparseable / empty side / self-crossed); drop bad entries (non-numeric/non-positive); **potentially-erroneous median-deviation filter at 5%, reinstate <2.5% (stateful hysteresis)**; calc failure ⇒ **no print (gap), don't interpolate** | Methodology v17.0 §5.1–5.5 | 2026-10-16 | index-replicator |
-| λ (exp weighting rate) | **λ = 10.3 / v_T** — **PARTIAL** (operator not confirmable from PDF text layer; dimensional analysis forces 1/BTC ⇒ only `/v_T` valid). **TOP-priority** open item — sets depth-weighting of every print; close via rendered PDF or empirical print-match. | Methodology v17.0 §6.1 (`brti-spec.md` O-2) | 2026-10-16 | index-replicator |
+| λ (exp weighting rate) | **λ = 1/(0.3·v_T) ≈ 3.33/v_T** — **VERIFIED 2026-10-16** (rendered PDF, human fetch: §6.1 Lambda cell is the fraction `1/(0.3 v_T)`; pypdf had flattened it to `"10.3 v_T"`, giving the earlier WRONG `10.3/v_T`). `λ·v_T = 1/0.3 ≈ 3.33` → weight decays to `e^(−3.33) ≈ 3.6%` at utilized depth (much flatter than the old `e^(−10.3)` assumption). | Methodology v17.0 §6.1 (`brti-spec.md` O-2, RESOLVED) | 2026-10-16 | index-replicator + Berk (fetch) |
 | Order-size cap mean | `C_T = s̄ + 5σ`, literal **s̄ = trimmed mean (Eq. 4e)**, σ = winsorized std (Eq. 4h) — **PARTIAL** (winsorized `s̄′` is an alternative reading; close empirically). | Methodology v17.0 §4.1.3, Eq. 5 (`brti-spec.md` O-4) | 2026-10-16 | index-replicator |
 | Settlement window endpoint | **Not defined by the CF RTI methodology** — the 60 s average is a Kalshi construct. `[T−59,T]` vs `[T−60,T−1]` stays **PARTIAL** (resolve empirically; see 0.1). | Methodology v17.0 (absence) | 2026-10-16 | index-replicator |
 
@@ -61,10 +59,11 @@ Agent = primary source). Red-team independently re-fetched and confirmed the VER
 - **CME mirror (`cmegroup.com/trading/files/...`) returned HTTP 403** (scraping block) on 2026-10-16 — same
   pattern as the Kalshi fee PDF — so the CME copy could NOT be cross-checked; all facts come from the CF
   Benchmarks docs host (primary). Red-team independently re-fetched the CF PDFs and confirmed the VERIFIED rows.
-- Open items carried to Phase 2 (full list in `docs/brti-spec.md` §7): **O-2 λ operator (top priority)** and
-  **O-4 cap mean** both feed every index print → resolve empirically vs. published BRTI before trusting fair
-  values. **O-7/O-8**: which of the 7 constituents we actually record (Gemini/Bullish/Crypto.com/LMAX may be
-  missing) and USDC-vs-native-USD market mapping — UNVERIFIED, audit `data/clean` in the tracking-error study.
+- Open items carried to Phase 2 (full list in `docs/brti-spec.md` §7): **O-2 λ is now RESOLVED**
+  (= `1/(0.3·v_T)`, corrected from the wrong `10.3/v_T`, 2026-10-16 rendered PDF). **O-4 cap mean**
+  (trimmed vs winsorized) still feeds every print → resolve empirically vs. published BRTI. **O-7/O-8**:
+  which of the 7 constituents we actually record (Gemini/Bullish/Crypto.com/LMAX may be missing) and
+  USDC-vs-native-USD market mapping — UNVERIFIED, audit `data/clean` in the tracking-error study.
 
 ## Venue feeds (ROADMAP 0.4)
 
@@ -76,25 +75,30 @@ CRC32 checksum (incl. worked example `1063832831`), and Binance `pu` rules again
 |---|---|---|---|---|---|
 | Coinbase Exchange `full`/`level3` | constituent | `wss://ws-direct.exchange.coinbase.com` | API key + HMAC-SHA256 (reqd since 2023-07-01) | **`sequence`** (jump > 1) | VERIFIED (`level3` resync + max-conns PARTIAL) |
 | Kraken v2 `level3` | constituent | `wss://ws-l3.kraken.com/v2` (⚠ 3-way host conflict) | REST `GetWebSocketsToken` → `token` | **`checksum`** (CRC32 top-10/side; NO seq number) | VERIFIED (host + resync PARTIAL) |
-| Bitstamp `live_orders_{pair}` | constituent | `wss://ws.bitstamp.net` (unconfirmed) | public | **`microtimestamp`** + MarketEventID (`since_id` backfill) | PARTIAL (WS v2 page Incapsula-blocked) |
+| Bitstamp `live_orders_{pair}` | constituent | `wss://ws.bitstamp.net` ✓ | public | **`event_id`/`pre_event_id` chain** (`pre_event_id` == prev `event_id`, like Binance `pu`); `since_id` REST backfill | VERIFIED 2026-10-16 (primary WS doc, human fetch) |
 | Binance USDⓈ-M `@depth`+`@aggTrade` | lead signal | `wss://fstream.binance.com` | public | **`pu`** (`pu == prev.u`; ≠ spot's `U==prev.u+1`) | VERIFIED resync/`pu` (speeds/trades/limits PARTIAL) |
 | Bybit v5 linear `orderbook`+`publicTrade` | lead signal | `wss://stream.bybit.com/v5/public/linear` | public | **`type=="snapshot"`** reset (no numeric `u`-gap rule) | VERIFIED incl. trades |
-| Kalshi `orderbook_delta`/`trade`/lifecycle | **trading venue** | `wss://external-api-ws.kalshi.com/trade-api/ws/v2` (legacy `api.elections.kalshi.com`; demo `external-api-ws.demo.kalshi.co`) | API key + RSA-PSS/Ed25519 sig over `ts+"GET"+"/trade-api/ws/v2"`, headers `KALSHI-ACCESS-KEY/SIGNATURE/TIMESTAMP` (ms) — READS ONLY | `seq` per `sid` (docs: seq "should be checked"; +1-per-sid is inferred) | **PARTIAL** — endpoints/auth/subscribe/frame VERIFIED (docs.kalshi.com); payload schema + seq semantics UNVERIFIED (see 1.1b) |
+| Kalshi `orderbook_delta`/`trade`/lifecycle | **trading venue** | `wss://external-api-ws.kalshi.com/trade-api/ws/v2` (legacy `api.elections.kalshi.com`; demo `external-api-ws.demo.kalshi.co`) — all VERIFIED | API key + RSA-PSS/Ed25519 sig over `ts+"GET"+"/trade-api/ws/v2"`, headers `KALSHI-ACCESS-KEY/SIGNATURE/TIMESTAMP` (ms) — READS ONLY, VERIFIED | subscribe `{id,cmd,params:{channels,market_tickers}}`, unsubscribe via `sids` (VERIFIED); orderbook msg schema + seq gap rule still UNVERIFIED | **PARTIAL** — endpoints/auth/subscribe/sids/msg-types VERIFIED (quick-start WS PDF, human fetch); orderbook payload schema + seq semantics need the channel-reference page (1.1b) |
 
 ### Feed verification notes
 - We **read market data only** — Coinbase HMAC / Kraken token are used solely to subscribe; no order path in a recorder.
-- Open items (full list in `docs/feeds.md` §7): **Bitstamp** WS v2 page is Incapsula-blocked → endpoint
-  host, `bts:subscribe` envelope, snapshot reconciliation, and limits PARTIAL (schema + `order_data`
-  backfill confirmed from the reachable REST primary). **Binance** diff-depth stream speeds + U/u/pu field
-  example are from a search excerpt (SPA body unrendered) — PARTIAL; the resync/`pu` algorithm is VERIFIED.
-  **Kraken** host is a 3-way conflict (`ws-l3` / `ws-auth` / `ws`) → recorder tries all three with fallback.
-  Both Bitstamp and the Binance stream pages want a human/authenticated fetch before coding.
-- **Kalshi** (added in 1.1, not part of 0.4): endpoints, subscribe envelope, auth-signing string, and the
-  `{type,sid,seq,msg}` frame shape are VERIFIED from `docs.kalshi.com` (quick-start WS + margin-ws schema).
-  UNVERIFIED (the main `/websockets` reference 404'd on 2026-10-16): the KXBTC15M event-market payload schema
-  (yes/no vs bid/ask arrays; price cents-int vs dollar-string) and the seq gap semantics (per-sid? +1?). The
-  adapter is tolerant (accepts both side-key shapes, coerces price/size) and flagged; **ROADMAP 1.1b** closes
-  it when `/websockets` is reachable (human-fetch candidate).
+- **Bitstamp VERIFIED 2026-10-16** (Berk fetched the primary WS doc): endpoint `wss://ws.bitstamp.net`,
+  subscribe envelope `{"event":"bts:subscribe","data":{"channel":"live_orders_<market>"}}`, ≤1024 channels/conn.
+  **Gap mechanism corrected:** `live_orders` events carry top-level **`event_id`/`pre_event_id`** ("allow you to
+  detect and recover" on reconnect) — a chain (`pre_event_id` == prev `event_id`), like Binance `pu`. NOT a
+  microtimestamp/+1 counter. The Bitstamp adapter is being updated to use this (the R2 microtimestamp-regression
+  default was a stopgap). (`microtimestamp` ordering + `since_id` REST backfill still apply to the separate
+  `detail/diff_order_book` channel.)
+- **Binance** diff-depth stream speeds + aggTrade field list stay **PARTIAL** — Berk reports the USDⓈ-M stream
+  doc pages no longer exist; the resync/`pu` algorithm is VERIFIED (How-to-manage page). Revisit if Binance republishes.
+- **Kraken** host is a 3-way conflict (`ws-l3` / `ws-auth` / `ws`) → recorder tries all three with fallback.
+- **Kalshi WS** (1.1b): VERIFIED from the quick-start WS PDF (human fetch) — prod/legacy/demo endpoints, auth
+  headers + signing string `ts+"GET"+"/trade-api/ws/v2"`, subscribe `{id,cmd,params:{channels,market_tickers}}`,
+  unsubscribe via `sids`, message types (`orderbook_snapshot`/`orderbook_delta`/`ticker`/`trade`/`market_lifecycle_v2`/
+  `error`), reconnect-with-backoff, auto keep-alive. Ticker uses `_dollars` string fields. **Still UNVERIFIED:** the
+  exact `orderbook_delta`/`orderbook_snapshot` payload schema (yes/no vs bid/ask; price format) and the seq gap
+  semantics (the quick-start shows no top-level `seq`) — these need the dedicated **channel-reference** page, not the
+  quick-start. 1.1b remains open on that page.
 
 ## KXBTC15M settlement fields (ROADMAP 1.2)
 

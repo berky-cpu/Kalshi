@@ -124,19 +124,19 @@ weighted average over that consolidated book.
 | `D` | Max deviation from mid defining utilized depth | **0.5%** | §6.2 |
 | PED | Potentially-erroneous-data deviation parameter | **5%** | §6.2 |
 | `C_T` | Order size cap (per price level, BTC) | **Dynamic** (per §3.7) | §6.2 |
-| `λ` | Exponential weighting rate | **λ = 10.3 / v_T** (scales with utilized depth) | §6.1 |
+| `λ` | Exponential weighting rate | **λ = 1/(0.3·v_T) ≈ 3.33/v_T** (VERIFIED 2026-10-16, rendered PDF) | §6.1 |
 | `τ` | Target levels (dynamic-spacing target) | **100** | §6.1 |
 | Retrieval Lag Threshold | staleness cutoff | **10 s** | §6.2 |
 
-> Note on `λ`: the Constants table renders Lambda as `10.3  v_T` (bare space; the PDF text
-> layer does not preserve the operator). The reading must be **λ = 10.3 / v_T** on
-> **dimensional grounds**: in `e^(−λv)` the exponent `λv` must be dimensionless, and both `v`
-> and `v_T` are in BTC, so `λ` must have units of 1/BTC. Only `10.3/v_T` is dimensionally
-> valid — a fixed scalar `10.3` is dimensionless (invalid) and `10.3·v_T` has units of BTC
-> (invalid). A consequence: `λ·v_T = 10.3` is then constant, so the exponential weight always
-> decays to ~`e^(−10.3) ≈ 3.4e−5` at the utilized depth — a scale-invariant, sensible design.
-> **Status: PARTIAL** — the operator could not be confirmed from the PDF text layer; confirm
-> via a rendered PDF and/or empirical print-match (see O-2, the top-priority open item).
+> Note on `λ`: **λ = 1/(0.3·v_T)** (≈ `3.33/v_T`). **VERIFIED 2026-10-16** from a rendered view
+> of the v17.0 PDF §6.1 (human fetch): the Constants cell is a typeset fraction `1 / (0.3 v_T)` —
+> the pypdf text layer flattened it to `"10.3 v_T"` (numerator `1` + denominator `0.3` ran
+> together), which had led to the earlier wrong reading `10.3/v_T`. The dimensional argument was
+> right about the *form* (λ must be 1/BTC, so a `…/v_T` ratio) but wrong about the constant.
+> Corrected consequence: `λ·v_T = 1/0.3 ≈ 3.33` is constant (still scale-invariant), so the
+> exponential weight decays to `e^(−3.33) ≈ 0.036` (~3.6%) at the utilized depth — a much
+> **flatter** depth-weighting than the old `e^(−10.3) ≈ 3.4e−5` assumption implied. **Status:
+> VERIFIED.** (Still worth an empirical print-match once the replica exists; see O-2.)
 
 ### 3.2 Order-book consolidation (steps 1–2)
 
@@ -255,7 +255,7 @@ def brti(books_by_venue, params):          # books at a single Effective Time T
     midPV    = (askPV + bidPV) / 2
     midSV    = askPV / midPV - 1
     v_T      = utilized_depth(midSV, grid, D=0.005)              # §3.4 Eq 2
-    lam      = 10.3 / v_T                                        # §6.1  (PARTIAL reading)
+    lam      = 1.0 / (0.3 * v_T)                                 # §6.1  λ=1/(0.3·v_T), VERIFIED 2026-10-16
 
     w        = [lam*exp(-lam*v) for v in grid if v <= v_T]
     NF       = sum(w)
@@ -364,7 +364,7 @@ applies.
 | ID | Item | Status | What would close it |
 |---|---|---|---|
 | O-1 | **CME-hosted PDFs unreachable.** `cmegroup.com/trading/files/bitcoin-real-time-index-methodology*.pdf` returned **HTTP 403** ("IP blocked due to suspected web scraping") to curl; WebFetch of the CME education pages was not used as a primary source. All methodology facts here come from the **CF Benchmarks docs host** (`docs.cfbenchmarks.com`), which is the administrator and co-publisher — a primary source — so facts are VERIFIED, but the CME mirror could not be cross-checked. | PARTIAL (source-access) | A human/authenticated fetch of the CME-hosted methodology PDF, or the CME education page, to cross-check v17.0. |
-| O-2 | **λ = 10.3 / v_T operator (TOP-PRIORITY open item).** The Constants table renders Lambda as `10.3  v_T` (bare space — the PDF text layer does not carry the operator). The reading is fixed to `λ = 10.3 / v_T` on **dimensional grounds**: `λv` in `e^(−λv)` must be dimensionless and `v, v_T` are both BTC, so `λ` must be 1/BTC — only `10.3/v_T` qualifies (fixed `10.3` is dimensionless; `10.3·v_T` is BTC; both invalid). This yields the scale-invariant property `λ·v_T = 10.3` (weight decays to ~`e^(−10.3)` at the utilized depth). Because `λ` sets the depth-weighting applied to **every** print, confirming it is the single highest-impact remaining verification. | PARTIAL | Read the λ row in a rendered v17.0 PDF **and/or** confirm empirically by matching published BRTI prints — close this first. |
+| O-2 | **λ = 1/(0.3·v_T) — RESOLVED 2026-10-16 (was wrong).** A rendered view of the v17.0 PDF §6.1 (human fetch) shows the Lambda cell is a typeset fraction `1 / (0.3 v_T)`; pypdf had flattened it to `"10.3 v_T"`, giving the earlier WRONG reading `10.3/v_T`. Correct value **λ = 1/(0.3·v_T) ≈ 3.33/v_T**; `λ·v_T = 1/0.3 ≈ 3.33` (scale-invariant), weight decays to `e^(−3.33) ≈ 3.6%` at utilized depth — a much flatter weighting than the old `e^(−10.3)` assumption. The dimensional argument correctly predicted the `…/v_T` form but not the constant. | **VERIFIED** | Resolved by rendered PDF. Optional: empirical print-match once the replica exists. |
 | O-3 | **`argmax_s f_KDE(s)` search grid** for dynamic spacing is unspecified (continuous argmax over a KDE). | PARTIAL | Methodology appendix (none found) or empirical: use a fine grid and show output invariance. |
 | O-4 | **Which mean enters the order-size cap Eq. 5.** The literal Eq. 5 symbol is the **bare/trimmed mean `s̄` (Eq. 4e)** — no prime — so the default reading is `C_T = s̄ + 5σ`. (pypdf preserves primes elsewhere — it renders `s ′` on Eq. 4g and `s ′_side` on Eq. 6e — so the absence of a prime on Eq. 5 is real, not an extraction artifact.) The **winsorized mean `s̄′`** is the alternative inference. Under the literal reading nothing is vestigial: the trimmed mean (Eq. 4e) feeds Eq. 5 and the winsorized mean (Eq. 4g) feeds `σ` (Eq. 4h); the winsorized reading would force Eq. 4e to be dead text. `σ` is the winsorized sample std (Eq. 4h) under either reading. | PARTIAL | Close empirically by matching replica caps to published BRTI prints. |
 | O-5 | **Settlement-window endpoint** `[T−59,T]` vs `[T−60,T−1]` — not defined by the RTI methodology (Kalshi construct). | PARTIAL (see §5) | Kalshi contract wording, or empirical regression of replica vs published KXBTC15M settlements. |
@@ -386,7 +386,7 @@ applies.
 | 6 | Dissemination precision | $0.01 | Methodology v17.0 §7 | BRTI "Dissemination Precision 0.01 U.S. Dollars" | VERIFIED | 2026-10-16 |
 | 7 | Algorithm (consolidate→curves→utilized depth→exp weight) | see §3 | Methodology v17.0 §4.1.1–4.1.2, Eq. 1a–3 | "The CME CF … Real Time Index is then given by the sum of the weighted mid price-volume curve" | VERIFIED | 2026-10-16 |
 | 8 | Deviation-from-mid D | 0.5% | Methodology v17.0 §6.2 | BRTI "Deviation from Mid (D) 0.5%" | VERIFIED | 2026-10-16 |
-| 9 | λ, τ constants | λ = 10.3/v_T; τ = 100 | Methodology v17.0 §6.1 | "Lambda (λ) 10.3 v_T; Target Level (τ) 100" | PARTIAL (λ reading) | 2026-10-16 |
+| 9 | λ, τ constants | **λ = 1/(0.3·v_T)**; τ = 100 | Methodology v17.0 §6.1 (rendered PDF, human fetch) | Lambda cell is the fraction `1/(0.3 v_T)` (pypdf flattened to "10.3 v_T"); "Target Level (τ) 100" | VERIFIED | 2026-10-16 |
 | 10 | Order size cap | Dynamic, literal `C_T = s̄ + 5σ` (s̄ = trimmed mean Eq 4e; σ = winsorized std Eq 4h) | Methodology v17.0 §4.1.3, Eq. 5 | "The order size cap … C_T = s̄ + 5σ" (bare s̄, no prime) | PARTIAL (which mean enters Eq 5; see O-4) | 2026-10-16 |
 | 11 | Dynamic spacing | `s_T = min(s_lev, s_KDE)`, τ=100 | Methodology v17.0 §4.1.4, Eq. 6–7 | "The spacing … s_T = min(s_lev, s_KDE)" | VERIFIED | 2026-10-16 |
 | 12 | Staleness rule | drop venue if lag > 10 s; all stale → failure | Methodology v17.0 §5.1 | "the Constituent Exchange is disregarded … exceeds the Retrieval Lag Threshold" | VERIFIED | 2026-10-16 |

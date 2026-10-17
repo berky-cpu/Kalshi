@@ -1,32 +1,28 @@
 """Kalshi trading fees.
 
-Fee schedule (PARTIALLY VERIFIED 2026-10-16; see docs/facts.md — only the API fields
-fee_type/fee_multiplier are primary-verified; the coefficients are corroboration-only).
-Kalshi uses a "quadratic"
-fee schedule. The per-order fee in dollars is:
-    taker: fee = round_up_to_cent(M_taker * 0.07   * C * P * (1 - P))
-    maker: fee = round_up_to_cent(M_maker * 0.0175 * C * P * (1 - P))
-with C contracts at price P in dollars, rounded UP to the next cent per order.
+Fee schedule (primary-VERIFIED 2026-10-16; see docs/facts.md). Source: Kalshi's own fee
+schedule PDF + `https://kalshi.com/fee-schedule`, fetched by Berk. Kalshi uses a "quadratic"
+fee schedule. The per-order fee in dollars is (quoted verbatim from the Kalshi schedule):
+    taker: fee = round_up(M_taker * 0.07   * C * P * (1 - P))
+    maker: fee = round_up(M_maker * 0.0175 * C * P * (1 - P))
+with C contracts at price P in dollars, rounded UP to the next cent per order. (The PDF text
+uses "centicent" wording; the schedule's own General Trading Fees TABLE resolves it to whole
+cents — e.g. the 100-contract column is 0.07/0.63/1.32/1.75 at P=0.01/0.10/0.25/0.50 — so our
+ROUND_CEILING to $0.01 reproduces the published table.)
 
 The per-series `fee_multiplier` returned by `GET /series/<ticker>` is M_taker (the
 taker multiplier). The baseline "quadratic" schedule has M_taker = 1 and M_maker = 0.
 
 KXBTC15M (`GET /series/KXBTC15M`): fee_type="quadratic", fee_multiplier=1 (VERIFIED-
-2026-10-16, Kalshi series API). Hence taker rate = 1 * 0.07 = 0.07 and, under the
-baseline M_maker = 0 with no maker-fee field present in the series/market JSON,
-KXBTC15M is treated as MAKER-FREE.
+2026-10-16, Kalshi series API). Hence taker rate = 1 * 0.07 = 0.07. KXBTC15M is MAKER-FREE:
+it is NOT on the Kalshi fee schedule's Non-standard maker-fee series list (VERIFIED-2026-10-16,
+kalshi.com/fee-schedule), consistent with the baseline M_maker = 0.
 
-Verification caveats (see docs/facts.md):
-- fee_type / fee_multiplier: VERIFIED from Kalshi series API (primary).
-- 0.07 / 0.0175 constants, round-UP-per-order, and C*P*(1-P) shape: VERIFIED by
-  corroboration (Allium fee docs quote the official schedule's formulas verbatim and
-  the schedule's own worked table checks out arithmetically). The official Kalshi
-  fee-schedule PDF could not be fetched directly on 2026-10-16 (HTTP 429) -> PARTIAL
-  on primary access; re-read the PDF to upgrade.
-- KXBTC15M maker-free: PARTIAL. Baseline M_maker=0 and the absent maker-fee field are
-  consistent with maker-free, but the authoritative live maker-fee series list lives
-  on kalshi.com/fee-schedule, which could not be fetched on 2026-10-16.
-- Per-order (vs per-fill) rounding: PARTIAL (primary wording not re-read).
+Verification (see docs/facts.md), all primary-VERIFIED 2026-10-16:
+- fee_type / fee_multiplier: Kalshi series API.
+- 0.07 / 0.0175 constants, round-UP-per-order, and C*P*(1-P) shape: Kalshi fee-schedule PDF
+  (formulas verbatim) + the schedule's published whole-cent fee table.
+- KXBTC15M maker-free: absent from the schedule's Non-standard maker-fee series list.
 
 Use Decimal throughout: fees are rounded up per order, so float error can flip a cent.
 """
@@ -38,7 +34,7 @@ from decimal import ROUND_CEILING, Decimal
 BASE_TAKER_RATE = Decimal("0.07")
 BASE_MAKER_RATE = Decimal("0.0175")
 
-# KXBTC15M taker multiplier M_taker from GET /series/KXBTC15M (VERIFIED-2026-10-16).
+# KXBTC15M taker multiplier M_taker from GET /series/KXBTC15M (VERIFIED-2026-10-16, series API).
 KXBTC15M_FEE_MULTIPLIER = Decimal("1")
 
 # Effective per-contract rates used by this project's KXBTC15M quoting/backtests.
