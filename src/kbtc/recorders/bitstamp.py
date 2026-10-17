@@ -17,6 +17,13 @@ the primary signal. Resync path: REST order-book seed + ``POST /api/v2/order_dat
 NOTE: the ``microtimestamp``-sequenced "discard buffered events older than the snapshot" behaviour
 belongs to the SEPARATE ``detail/diff_order_book`` channel — NOT ``live_orders`` — do not conflate.
 ``live_orders`` has no snapshot message; seed the book from the REST order book.
+
+RESEED CORRECTNESS: on reseed we record the REST snapshot's top-level ``microtimestamp`` as a
+discard FLOOR and drop every subsequent ``live_orders`` event with ``microtimestamp <= floor``
+(already contained in the snapshot) before applying/anchoring. Without this floor the events that
+arrive right after a reseed — which all pre-date the snapshot because run_recorder suspends the
+read loop during the HTTP fetch — would double-apply and corrupt the book. This is the true
+analogue of Coinbase's ``sequence <= S`` live-path guard.
 """
 from __future__ import annotations
 
@@ -44,9 +51,22 @@ class BitstampProcessor(MessageProcessor):
         self.book = OrderIdBook()
         self.last_event_id: str | None = None  # primary chain anchor (UUID string)
         self.last_microtimestamp: int | None = None  # secondary ordering sanity check
+        # Post-reseed stale-event FLOOR (microtimestamp). Set by apply_snapshot; events at or
+        # below it are already in the snapshot and MUST be dropped before applying/anchoring.
+        self.snapshot_floor_micro: int | None = None
 
     def apply_snapshot(self, snapshot: Any, recv_ts_ns: int | None = None) -> None:
-        """Seed from the REST detail order book: {"bids":[[price,amount,order_id],...], "asks":...}."""
+        """Seed from the REST detail order book:
+        ``{"microtimestamp": "...", "timestamp": "...", "bids":[[price,amount,order_id],...], "asks":...}``.
+
+        ``live_orders`` has no snapshot message and no sequence number, so the reseed uses the
+        REST order book's top-level ``microtimestamp`` as a discard FLOOR: because run_recorder
+        suspends the read loop during the fetch, the events that arrive next all pre-date the
+        snapshot's effective time and are ALREADY in the reseeded book. Replaying them would
+        double-apply (e.g. a stale ``order_created`` whose ``order_deleted`` fell in the gap would
+        resurrect as a phantom order). The live guard in :meth:`process` drops every event with
+        ``microtimestamp <= floor`` before touching the book or anchoring the chain.
+        """
         snap = as_dict(snapshot)
         self.book.clear()
         for row in snap.get("bids", []):
@@ -55,7 +75,14 @@ class BitstampProcessor(MessageProcessor):
             self.book.add(str(row[2]), ASK, row[0], row[1])
         self.synced = True
         self.needs_resnapshot = False
-        # A fresh snapshot breaks the old chain; re-anchor on the next live event.
+        # Discard floor = the snapshot's microtimestamp (fallback: timestamp in seconds -> micros).
+        floor = _int_or_none(snap.get("microtimestamp"))
+        if floor is None:
+            ts = _int_or_none(snap.get("timestamp"))
+            floor = ts * 1_000_000 if ts is not None else None
+        self.snapshot_floor_micro = floor
+        self.last_microtimestamp = floor  # secondary check also respects the floor
+        # A fresh snapshot breaks the old chain; re-anchor on the first live event past the floor.
         self.last_event_id = None
 
     def process(self, raw: Any, recv_ts_ns: int) -> list[dict]:
@@ -72,6 +99,16 @@ class BitstampProcessor(MessageProcessor):
         data = msg.get("data") or {}
         event_id = msg.get("event_id")
         pre_event_id = msg.get("pre_event_id")
+        micro = _int_or_none(data.get("microtimestamp"))
+
+        # --- POST-RESEED STALE-EVENT GUARD (the analogue of Coinbase seq<=S): events already in
+        # the reseed snapshot carry microtimestamp <= floor. Drop them BEFORE applying or
+        # anchoring, with no gap — they are expected, not missing. The floor is consumed once a
+        # live event passes it (subsequent events are strictly newer). ---
+        if self.snapshot_floor_micro is not None and micro is not None:
+            if micro <= self.snapshot_floor_micro:
+                return []
+            self.snapshot_floor_micro = None  # first event past the floor: resume normal checks
 
         # --- PRIMARY gap signal: pre_event_id must chain off the previous event_id ---
         chain_broke = False

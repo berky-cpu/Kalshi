@@ -51,8 +51,11 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   + replay tests w/ seeded gaps (65 pass). Review [REV-005](notes/reviews/REV-005-roadmap-1.1-recorders.md)
   (FAIL→PASS, Round 2). Split IO layer vs. pure processor; `resync_on_gap` keeps trade-tape gaps log-only;
   Kraken CRC32 externally validated vs the documented example (`1063832831`). **Kalshi split to 1.1b.**
-  *Open (→ later integration):* the actual resync FETCH (REST/in-band snapshot) is stubbed/untested (F8);
-  Bitstamp endpoint/envelope + Binance stream speeds/aggTrade stay PARTIAL pending a human fetch (0.4 open items).
+  *Resync-FETCH (F8): DONE 2026-10-16* — `src/kbtc/recorders/resync.py` (REST-snapshot for Coinbase/Binance/
+  Bitstamp; in-band resubscribe for Kraken/Bybit), review [REV-008](notes/reviews/REV-008-resync-fetch.md)
+  (FAIL→PASS; R1 caught a Bitstamp silent book-corruption, fixed via a microtimestamp floor). 101 tests pass.
+  *Open:* Bitstamp endpoint/envelope now VERIFIED (human fetch); Binance stream speeds/aggTrade stay PARTIAL
+  (doc pages gone). `run_recorder` live-socket loop still unit-untested (exercised by the 1.3 VPS run).
 - [ ] **1.1b Kalshi WS adapter — finalize.** Quick-start WS doc (human fetch, 2026-10-16) VERIFIED the
   connection layer: prod/legacy/demo endpoints, auth headers + signing string, subscribe
   `{id,cmd,params:{channels,market_tickers}}`, unsubscribe via `sids`, message types, reconnect+keepalive
@@ -62,6 +65,10 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   semantics** (quick-start shows no top-level `seq`). *Accept:* verify payload + seq from the channel
   reference, replace the synthetic fixture with a captured real frame, record in `docs/feeds.md` +
   `docs/facts.md`, red-team sign-off. Owner: data-engineer.
+  *Also (from REV-008):* Kalshi in-band **resync is a fail-safe no-op** until this is done — before enabling
+  it in the live run, add **sid-pruning** (on a resync `orderbook_snapshot`, restrict deltas/trades to the
+  snapshot's sid) OR reconnect-based resync, with a test that an old-sid delta after the fresh snapshot
+  leaves the book unchanged.
 - [x] **1.2** Settlement capture: record every KXBTC15M market's final result and settlement value.
   *Done 2026-10-16:* `src/kbtc/recorders/settlement.py` + tests (78 pass). Review
   [REV-006](notes/reviews/REV-006-roadmap-1.2-settlement.md) (FAIL→PASS, Round 2). Kalshi REST

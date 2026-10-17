@@ -84,6 +84,18 @@ class KalshiProcessor(MessageProcessor):
     def book_for(self, ticker: str) -> dict[str, dict[Any, Any]]:
         return self.books.setdefault(ticker, {})
 
+    def known_sids(self) -> list[int]:
+        """Subscription ids currently tracked — used to unsubscribe the old subscription before a
+        resync resubscribes (so a resync never opens a second concurrent sub → double-count)."""
+        return sorted(self._seq_by_sid.keys())
+
+    def begin_resync(self) -> None:
+        """In-band resync: drop ``synced`` and set ``awaiting_snapshot`` so frames from the OLD
+        subscription arriving before the fresh ``orderbook_snapshot`` are dropped (not applied
+        twice, not re-arming resync) until the new snapshot lands. UNVERIFIED (1.1b)."""
+        self.synced = False
+        self.awaiting_snapshot = True
+
     def _check_seq(self, sid: Any, seq: Any, recv_ts_ns: int) -> bool:
         """Return True if this message is in-sequence for its sid; emit a gap otherwise."""
         if sid is None or seq is None:
@@ -111,6 +123,12 @@ class KalshiProcessor(MessageProcessor):
         sid, seq = msg.get("sid"), msg.get("seq")
         body = msg.get("msg", {})
 
+        # After a resubscribe, suppress everything until the fresh orderbook_snapshot lands: this
+        # drops any trailing frames from the OLD subscription (so no double-apply) and prevents
+        # resubscribe-frame thrash. UNVERIFIED (1.1b).
+        if self.awaiting_snapshot and typ != "orderbook_snapshot":
+            return []
+
         if typ == "orderbook_snapshot":
             # Snapshot always (re)baselines seq for this sid and rebuilds the book.
             if sid is not None and seq is not None:
@@ -118,6 +136,7 @@ class KalshiProcessor(MessageProcessor):
             self._apply_snapshot_body(body)
             self.synced = True
             self.needs_resnapshot = False
+            self.awaiting_snapshot = False  # fresh snapshot landed; resume
             return [{"kind": "snapshot", "ticker": body.get("market_ticker")}]
 
         if typ == "orderbook_delta":
@@ -194,6 +213,28 @@ def subscribe_messages(tickers: list[str] | None = None,
     if tickers:
         params["market_tickers"] = tickers
     return [{"id": 1, "cmd": "subscribe", "params": params}]
+
+
+def unsubscribe_messages(sids: list[int]) -> list[dict]:
+    """Unsubscribe the given subscription ids before a resync resubscribes.
+
+    UNVERIFIED (1.1b): the event-markets WS reference could not be read this session, so the
+    ``{"cmd":"unsubscribe","params":{"sids":[...]}}`` envelope is inferred (the margin/perps docs
+    show ``sid`` as the subscription identifier). Reads only — never an order path.
+    """
+    return [{"id": 1, "cmd": "unsubscribe", "params": {"sids": list(sids)}}]
+
+
+def resubscribe_messages(tickers: list[str] | None = None) -> list[dict]:
+    """Resubscribe to the orderbook channel to pull a fresh ``orderbook_snapshot``.
+
+    UNVERIFIED (1.1b): the official event-markets WS reference could not be read this session,
+    so neither the unsubscribe-by-``sid`` envelope nor the guarantee that a resubscribe re-emits
+    an ``orderbook_snapshot`` is confirmed. We therefore send a plain ``subscribe`` for the
+    orderbook channel as the resync trigger and keep the flag UNVERIFIED. Reads only — this is
+    NEVER an order path (CLAUDE.md hard rule 1).
+    """
+    return subscribe_messages(tickers, channels=("orderbook_delta",))
 
 
 def io_config(tickers: list[str] | None = None) -> IoConfig:
