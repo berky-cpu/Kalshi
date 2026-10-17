@@ -45,7 +45,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from . import binance, bitstamp, bybit, coinbase, kalshi, kraken
+from . import binance, bitstamp, bybit, coinbase, coinbase_advanced, kalshi, kraken
 from . import resync as resync_mod
 from .base import IoConfig, MessageProcessor, logger, run_recorder
 from .writer import RotatingZstdWriter
@@ -239,6 +239,15 @@ def _build_bybit(name: str, env: Mapping[str, str], root: str, **_: Any) -> Buil
     return BuiltFeed(name, "bybit", "perp", cfg, procs, rb, root)
 
 
+def _build_coinbase_advanced(name: str, env: Mapping[str, str], root: str, **_: Any) -> BuiltFeed:
+    # Public retail Advanced Trade level2 (no auth). Writer path: coinbase_advanced/level2 — distinct
+    # from the Exchange adapter's coinbase/{full,level3}. In-band resync (resubscribe → snapshot).
+    cfg = coinbase_advanced.io_config()
+    proc = coinbase_advanced.CoinbaseAdvancedProcessor()
+    rb = resync_mod.coinbase_advanced_resync_builder()
+    return BuiltFeed(name, "coinbase_advanced", "level2", cfg, [proc], rb, root)
+
+
 def _build_kalshi(name: str, env: Mapping[str, str], root: str, *,
                   signer_factory: SignerFactory | None = None, **_: Any) -> BuiltFeed:
     # Market-data READS from Kalshi production; no order path. Optional ticker filter via
@@ -294,6 +303,12 @@ FEEDS: dict[str, FeedDef] = {
         "bybit-perp",
         (),  # public, no auth
         lambda env, root, **kw: _build_bybit("bybit-perp", env, root, **kw),
+    ),
+    "coinbase-advanced-level2": FeedDef(
+        "coinbase-advanced-level2",
+        (),  # public retail Advanced Trade feed — no credentials
+        lambda env, root, **kw: _build_coinbase_advanced(
+            "coinbase-advanced-level2", env, root, **kw),
     ),
     "kalshi": FeedDef(
         "kalshi",

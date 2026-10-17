@@ -373,11 +373,63 @@ fixed `args` count limit for linear. Per-connection request-count limit not stat
 
 ---
 
+## 5A. Coinbase **Advanced Trade** (RETAIL) (BRTI constituent) — `level2` channel
+
+> **Product note.** DISTINCT from §1 Coinbase **Exchange** (`ws-direct.exchange.coinbase.com`,
+> institutional, HMAC-auth, $5k-blocked). This is the **public retail Advanced Trade** WebSocket,
+> reachable from anywhere. It is an **L2 price-level** feed (price→qty), not order-by-order.
+> **VERIFIED from primary docs (docs.cdp.coinbase.com), read 2026-10-17.**
+
+**Endpoint (VERIFIED):** `wss://advanced-trade-ws.coinbase.com` — **PUBLIC; "A JWT is not required"**
+for market-data channels. The optional JWT auth is NOT wired (it expires in 2 min; public suffices).
+
+**Subscribe (VERIFIED), one channel per message:**
+```json
+{"type":"subscribe","product_ids":["BTC-USD"],"channel":"level2"}
+{"type":"subscribe","product_ids":["BTC-USD"],"channel":"heartbeats"}
+```
+You must subscribe **within 5 s** of connect or you are disconnected; idle channels close in
+**60–90 s**, so the `heartbeats` subscription is **REQUIRED** to keep the socket alive. Unsubscribe
+mirrors subscribe with `"type":"unsubscribe"`.
+
+**Envelope (VERIFIED) — note the subscribe/data channel-name mismatch:** you SUBSCRIBE to `"level2"`
+but data messages come back on **`channel`=`"l2_data"`**. Top-level: `channel`, `timestamp`
+(RFC3339), `sequence_num`, `events[]`.
+- `events[]`: `type` (`"snapshot"` | `"update"`), `product_id`, `updates[]`.
+- `updates[]`: `side` (`"bid"` | `"offer"`), `price_level` (string), `new_quantity` (string — the
+  **FULL size** at that level, NOT a delta; `"0"` ⇒ remove the level), `event_time` (RFC3339).
+
+**Book model:** price-level (`PriceLevelBook`), `side` `"offer"`→ask. `new_quantity=="0"` deletes;
+any other value SETS (replaces). Prices/qtys kept `Decimal` from the exact transmitted strings.
+
+**Sequence / gap detection (VERIFIED, important subtlety):** `sequence_num` is **per-CONNECTION**
+(not per-product) and increments by **exactly 1 on EVERY message** on the connection — `l2_data`,
+`heartbeats`, the `subscriptions` ack, everything. So the gap check runs over the **full connection
+stream**: `got > prev+1` ⇒ gap (→ resync); a lower/equal value is a duplicate/out-of-order and is
+ignored (do **not** filter to `l2_data` first, or every heartbeat reads as a false gap). A reconnect
+restarts `sequence_num`, so a `snapshot` re-anchors the sequence.
+
+**Completeness:** the first `l2_data` after subscribe is a `type:"snapshot"` (full book) ⇒ this
+constituent establishes a **COMPLETE** baseline offline (`synced=True`), unlike Bitstamp.
+
+**Resync (in-band, like Bybit):** on a gap, resubscribe to `level2`; Coinbase re-pushes a fresh
+`snapshot` that rebuilds the book and clears the flag (no REST fetch).
+
+**Writer path:** `coinbase_advanced/level2` (distinct from Exchange's `coinbase/{full,level3}`).
+Feed name `coinbase-advanced-level2`, `required_env=()`.
+
+**Status: VERIFIED** (endpoint, public/no-auth, subscribe incl. heartbeats keep-alive, `l2_data`
+envelope + update schema, per-connection `sequence_num` gap rule, in-stream snapshot). PARTIAL: exact
+max-connections / message-rate limits not recorded here (not load-bearing for a single BTC-USD feed).
+
+---
+
 ## 6. Cross-venue summary table
 
 | Venue | BRTI? | Endpoint (prod) | Auth | Gap-detection field | Snapshot / resync | Status |
 |---|---|---|---|---|---|---|
 | **Coinbase Exchange** `full`/`level3` | constituent | `wss://ws-direct.exchange.coinbase.com` | API key + HMAC-SHA256 (reqd since 2023-07-01) | **`sequence`** (jump > 1) | REST `/products/BTC-USD/book?level=3`, discard msgs ≤ snapshot `sequence`, replay | VERIFIED (`level3` resync + heartbeat PARTIAL) |
+| **Coinbase Advanced Trade** (retail) `level2` | constituent | `wss://advanced-trade-ws.coinbase.com` | **public (no JWT)** | **`sequence_num`** per-CONNECTION (jump > 1; incl. heartbeats) | in-band resubscribe `level2` → fresh `snapshot` | VERIFIED (limits PARTIAL) |
 | **Kraken** v2 `level3` | constituent | `wss://ws-l3.kraken.com/v2` (⚠ vs `ws-auth…`) | REST `GetWebSocketsToken` → `token` in subscribe | **`checksum`** (CRC32 top-10/side) | subscribe `snapshot:true`; on checksum mismatch resubscribe | VERIFIED (endpoint host + resync PARTIAL) |
 | **Bitstamp** `live_orders_{pair}` | constituent | `wss://ws.bitstamp.net` | public (market data) | **`pre_event_id` → `event_id` chain** (`microtimestamp` secondary) | REST order book seed; `POST /api/v2/order_data/` `since_id` replay | VERIFIED |
 | **Binance** USDⓈ-M `@depth`+`@aggTrade` | lead signal | `wss://fstream.binance.com` | public | **`pu`** (`pu == prev.u`) | REST `fapi/v1/depth?limit=1000` → `lastUpdateId`; `U≤id≤u` align; `pu` chain | VERIFIED resync/`pu` (stream speeds + field example + trades/limits PARTIAL) |
@@ -405,6 +457,7 @@ fixed `args` count limit for linear. Per-connection request-count limit not stat
 
 | Venue | Doc URL | Version / date shown | Status |
 |---|---|---|---|
+| Coinbase **Advanced Trade** (retail) — WebSocket overview + `level2`/`heartbeats` channels | `https://docs.cdp.coinbase.com/advanced-trade/docs/ws-overview` + `…/ws-channels` | not versioned; read 2026-10-17 | VERIFIED (endpoint, public/no-JWT, subscribe, `l2_data` schema, per-connection `sequence_num`, heartbeats keep-alive) |
 | Coinbase Exchange — channels (`full`/`level3`) | `https://docs.cdp.coinbase.com/exchange/docs/websocket-channels` | not versioned; read 2026-10-16 | VERIFIED |
 | Coinbase Exchange — overview (endpoints, auth, `sequence`) | `https://docs.cdp.coinbase.com/exchange/websocket-feed/overview` | not versioned; read 2026-10-16 | VERIFIED |
 | Coinbase Exchange — rate limits | `https://docs.cdp.coinbase.com/exchange/websocket-feed/rate-limits` | not versioned; read 2026-10-16 | VERIFIED |

@@ -91,13 +91,14 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   is measured by the 1.4 health report's `gap_time_fraction < 0.1% AND msgs_per_s >= floor` gate.
   *Deployed 2026-10-17* on a Hetzner CPX31 (Ashburn, US-East). **Live & recording 24/7:** Bitstamp
   (live_orders), Kraken (level3), Kalshi settlement capture, + health/disk timers — all healthy (0 gaps).
-  Pending on this box: Coinbase (→ 1.1d, institutional-blocked), backup remote (`KBTC_BACKUP_REMOTE` unset),
-  Kalshi WS book (1.1b).
+  B2 backup WORKING (rclone `[b2]` → `b2:kbtc-data-by/raw`, nightly timer enabled, last run OK).
+  Pending on this box: Coinbase retail (1.1d built — deploy here for the live capture), Kalshi WS book (1.1b).
   *EU perp box added 2026-10-17* — a Hetzner CX22 (EU, x86_64) because Binance (HTTP 451) and Bybit
   (HTTP 403) **geo-block the US Ashburn IP** (verified). **Live & recording 24/7:** `binance-perp`
   (depthUpdate + persisted REST snapshot → complete books) and `bybit-perp` (orderbook.50 snapshot+delta),
   both public/no-auth, + health/disk timers — health report all-green, **0 seq-gaps, 100% uptime**. This
-  unblocks **2.3**. Pending on this box: B2 backup (same rclone step as Ashburn, Berk's B2 key).
+  unblocks **2.3**. B2 backup wired + verified 2026-10-17 (same `b2:kbtc-data-by/raw`, disjoint venue dirs;
+  upload path confirmed end-to-end; nightly timer enabled).
   The clean 72 h <0.1%-gap acceptance run is still pending (needs backups wired on both boxes).
 - [x] **1.4** Health report script: per-feed uptime, message rates, gaps, disk usage.
   *Done 2026-10-16:* `src/kbtc/recorders/health.py` + CLI + tests (92 pass). Review
@@ -163,8 +164,20 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   Coinbase **Exchange** `level3`/`full`, which (confirmed 2026-10-17) needs an **institutional Prime account
   (~$5,000 application)** — not viable. Build a new adapter for Coinbase's **retail Advanced Trade**
   WebSocket **`level2`** (price-level book) instead — sufficient for the BRTI price-volume curves; different
-  endpoint/auth (CDP key, no passphrase) and schema, so it needs its own feed-spec + adapter + replay test.
-  *Until then the index runs on 2/3 constituents (Bitstamp + Kraken).* Owner: data-engineer.
+  endpoint/auth and schema, so it needs its own feed-spec + adapter + replay test.
+  *Built 2026-10-17 (PROVISIONAL — not yet a counted constituent):* `src/kbtc/recorders/coinbase_advanced.py`
+  feed `coinbase-advanced-level2`, endpoint `wss://advanced-trade-ws.coinbase.com`, **public/no-auth**,
+  price-level `PriceLevelBook` (`side` bid/offer, `new_quantity` full-size, `"0"`=remove), subscribes
+  `level2` + the required `heartbeats` keep-alive. Gap detection on the **per-connection** `sequence_num`
+  over the full stream (heartbeats/acks advance it, don't false-gap); snapshot re-anchors; self-snapshotting
+  so books normalize **complete** (`synced=True`), unlike Bitstamp. Writer path `coinbase_advanced/level2`
+  (isolated from `coinbase/{full,level3}`). Spec VERIFIED from docs.cdp.coinbase.com (2026-10-17) →
+  feeds.md §5A + facts.md. Review [REV-015](notes/reviews/REV-015-roadmap-1.1d-coinbase-advanced.md)
+  (PASS-with-caveats; F2/F3 fixed). **251 tests pass.**
+  **Acceptance NOT closed (F1):** the fixture is synthetic — the per-connection-`sequence_num` /
+  snapshot-on-resubscribe spec must be confirmed against a **live capture from the US box** before Coinbase
+  is counted (CLAUDE.md rule 4). Deploy to Ashburn → capture → replay closes it. *Until then the index runs
+  on 2 verified (Bitstamp + Kraken) + 1 provisional (Coinbase).* Owner: data-engineer.
 
 - [x] **1.1c Persist REST snapshots into recordings (recorder completeness).** The recorder applies REST
   order-book snapshots (initial sync + resync) in memory but wrote only inbound WS frames, so
