@@ -93,6 +93,13 @@ CRC32 checksum (incl. worked example `1063832831`), and Binance `pu` rules again
   `level2` → fresh snapshot). L2 price-level book (`PriceLevelBook`), not order-id. Writer path
   `coinbase_advanced/level2`, feed `coinbase-advanced-level2`, `required_env=()`. **PARTIAL:** exact
   max-connections / message-rate limits not recorded (not load-bearing for one BTC-USD feed).
+  **LIVE-WIRE CONFIRMED 2026-10-17** (Ashburn box): a direct wire probe showed `sequence_num` +1 contiguous
+  across `l2_data` (0–7) → `subscriptions` (8–9) → `l2_data` (10–15) with the in-stream `snapshot` at seq 0
+  (40,872 levels, a ~5 MiB frame — needs `max_size=None`, [REV-016]). The real capture replayed clean through
+  the production normalizer: 49,640 book rows, `synced` all True, reconstructed book uncrossed
+  (best_bid 81124.80 / best_ask 81124.81), 0 seq-gaps in the health replay. The per-connection-`sequence_num`
+  and in-stream-snapshot claims are now VERIFIED on the wire (1.1d F1 closed); snapshot-on-*reconnect* will be
+  exercised by natural 24/7 disconnects (health report would flag any resulting gap).
 - **Bitstamp VERIFIED 2026-10-16** (Berk fetched the primary WS doc): endpoint `wss://ws.bitstamp.net`,
   subscribe envelope `{"event":"bts:subscribe","data":{"channel":"live_orders_<market>"}}`, ≤1024 channels/conn.
   **Gap mechanism corrected:** `live_orders` events carry top-level **`event_id`/`pre_event_id`** ("allow you to
