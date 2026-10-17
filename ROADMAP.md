@@ -59,7 +59,15 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   (the `docs.kalshi.com/websockets` reference 404'd 2026-10-16). *Accept:* verify payload + seq against the
   Kalshi WS reference (human/authenticated fetch), replace the synthetic fixture with a captured real frame,
   record in `docs/feeds.md` + `docs/facts.md`, red-team sign-off. Owner: data-engineer.
-- [ ] **1.2** Settlement capture: record every KXBTC15M market's final result and settlement value.
+- [x] **1.2** Settlement capture: record every KXBTC15M market's final result and settlement value.
+  *Done 2026-10-16:* `src/kbtc/recorders/settlement.py` + tests (78 pass). Review
+  [REV-006](notes/reviews/REV-006-roadmap-1.2-settlement.md) (FAIL→PASS, Round 2). Kalshi REST
+  exposes the numeric settlement value (`expiration_value` = close reference, `floor_strike` = open
+  reference) — no BRTI reconstruction needed for ground truth; fields recorded in `docs/facts.md`.
+  Completeness is enforced (missing-boundary / closed-unsettled / `result_inconsistent` all logged,
+  never silent); idempotent/resumable. Empirically confirmed `result=="yes" iff close≥open` (0.1 ≥-mechanic).
+  *Open:* `expiration_value` "= 60 s close-window BRTI avg" identity + window endpoint stay PARTIAL
+  (Phase-2 empirical); no live poll loop / systemd unit yet (→ relates to 1.3).
 - [ ] **1.3** VPS deployment (`deploy/`): systemd units, log rotation, disk alarms, daily
   upload/backup. *Accept:* 72 h unattended run with < 0.1 % gap time per feed.
 - [ ] **1.4** Health report script: per-feed uptime, message rates, gaps, disk usage.

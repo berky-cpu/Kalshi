@@ -1,0 +1,23 @@
+{
+  "market": {
+    "ticker": "KXBTC15M-26OCT162015-15",
+    "event_ticker": "KXBTC15M-26OCT162015",
+    "market_type": "binary",
+    "status": "finalized",
+    "result": "yes",
+    "settlement_value_dollars": "1.0000",
+    "expiration_value": "81504.11",
+    "floor_strike": 81501.4,
+    "strike_type": "greater_or_equal",
+    "open_time": "2026-10-17T00:00:00Z",
+    "close_time": "2026-10-17T00:15:00Z",
+    "expected_expiration_time": "2026-10-17T00:20:00Z",
+    "expiration_time": "2026-10-24T00:15:00Z",
+    "latest_expiration_time": "2026-10-24T00:15:00Z",
+    "settlement_ts": "2026-10-17T00:15:06.835917Z",
+    "settlement_timer_seconds": 1,
+    "occurrence_datetime": "2026-10-17T00:20:00Z",
+    "title": "BTC price up in next 15 mins?",
+    "yes_sub_title": "Target Price: $81,501.40"
+  }
+}
