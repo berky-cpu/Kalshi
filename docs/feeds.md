@@ -159,6 +159,24 @@ bids sorted price **descending**; for each order in queue order, take `limit_pri
 append price then qty. Concatenate **asks-string then bids-string**, CRC32, cast to **unsigned
 32-bit**, compare to `checksum`. (Guide's worked example result: `1063832831`.)
 
+**Two implementation subtleties the worked example does NOT surface (VERIFIED 2026-10-17 by
+replaying a real recorded BTC/USD level3 hour — ~8.2k updates across 3 connection segments — and
+reproducing the venue `checksum` on every update; these were the root cause of the ROADMAP 2.1a(c)
+offline-replay divergence):**
+- **"Queue order" within a price level = TIME PRIORITY (oldest `timestamp` first), not
+  receive/insertion order.** Each order carries a `timestamp`; the level is checksummed oldest→
+  newest by that field. They differ whenever an order re-enters the top-10 (several `add`s at one
+  price in one frame, listed newest-first) or a `modify` **raises qty or changes price** — such a
+  `modify` arrives with a **fresh `timestamp`** (priority lost → order goes to the back), whereas a
+  qty-decrease `modify` keeps the original `timestamp`. The recorder must adopt the `timestamp` on
+  every `add` AND `modify` and order each level by it.
+- **Use the EXACT transmitted digits, including trailing zeros.** v2 sends `limit_price`/`order_qty`
+  as JSON **numbers** that carry full precision with trailing zeros (`0.00010000`, `0.00479590`).
+  Parse them as **strings** (`json.loads(parse_float=str)`): a float round-trip drops the trailing
+  zeros (`0.00479590`→`0.0047959` → wrong token) and can emit exponent notation (`1e-05`) for tiny
+  sizes, corrupting the CRC. The hand-built string-valued `level3.jsonl` fixture hid this because
+  its values were already strings; the real wire does not.
+
 **Snapshot + resync (VERIFIED behavior; resync procedure PARTIAL):** the snapshot arrives first on
 the channel (`snapshot:true`); updates follow. There is no explicit dropped-message signal, so the
 resync trigger is a **checksum mismatch** (or disconnect): **unsubscribe/resubscribe with
