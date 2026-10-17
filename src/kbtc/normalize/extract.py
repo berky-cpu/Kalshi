@@ -91,6 +91,10 @@ def exch_ts_ns(venue: str, msg: Any) -> int | None:
         # level3 positional rows have no decoded time here; full-channel objects carry "time".
         t = msg.get("time")
         return _iso_ns(t) if isinstance(t, str) else None
+    if v == "coinbase_advanced":
+        # Advanced Trade l2_data envelope carries a top-level RFC3339 ``timestamp``.
+        t = msg.get("timestamp")
+        return _iso_ns(t) if isinstance(t, str) else None
     if v == "kraken":
         data = msg.get("data") or []
         if data and isinstance(data[0], dict):

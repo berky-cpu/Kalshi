@@ -74,6 +74,7 @@ CRC32 checksum (incl. worked example `1063832831`), and Binance `pu` rules again
 | Venue | BRTI? | Endpoint (prod) | Auth | Gap-detection field | Status |
 |---|---|---|---|---|---|
 | Coinbase Exchange `full`/`level3` | constituent | `wss://ws-direct.exchange.coinbase.com` | API key + HMAC-SHA256 (reqd since 2023-07-01) | **`sequence`** (jump > 1) | VERIFIED (`level3` resync + max-conns PARTIAL) |
+| Coinbase **Advanced Trade** (retail) `level2` | constituent | `wss://advanced-trade-ws.coinbase.com` | **public (no JWT)** | **`sequence_num`** per-CONNECTION (jump > 1; counts heartbeats/acks too) | VERIFIED 2026-10-17 (docs.cdp.coinbase.com; in-band `level2` snapshot resync; limits PARTIAL) |
 | Kraken v2 `level3` | constituent | `wss://ws-l3.kraken.com/v2` (⚠ 3-way host conflict) | REST `GetWebSocketsToken` → `token` | **`checksum`** (CRC32 top-10/side; NO seq number) | VERIFIED (host + resync PARTIAL) |
 | Bitstamp `live_orders_{pair}` | constituent | `wss://ws.bitstamp.net` ✓ | public | **`event_id`/`pre_event_id` chain** (`pre_event_id` == prev `event_id`, like Binance `pu`); `since_id` REST backfill | VERIFIED 2026-10-16 (primary WS doc, human fetch) |
 | Binance USDⓈ-M `@depth`+`@aggTrade` | lead signal | `wss://fstream.binance.com` | public | **`pu`** (`pu == prev.u`; ≠ spot's `U==prev.u+1`) | VERIFIED resync/`pu` (speeds/trades/limits PARTIAL) |
@@ -82,6 +83,16 @@ CRC32 checksum (incl. worked example `1063832831`), and Binance `pu` rules again
 
 ### Feed verification notes
 - We **read market data only** — Coinbase HMAC / Kraken token are used solely to subscribe; no order path in a recorder.
+- **Coinbase Advanced Trade (retail) VERIFIED 2026-10-17** (docs.cdp.coinbase.com): endpoint
+  `wss://advanced-trade-ws.coinbase.com`, **public — "A JWT is not required"** for market data (no auth wired);
+  subscribe one channel per message (`level2` + REQUIRED `heartbeats` keep-alive, within 5 s of connect; idle cut
+  60–90 s); data arrives on `channel:"l2_data"` (you subscribe to `"level2"`); `updates[]` carry `side`
+  (`bid`/`offer`), `price_level`, `new_quantity` (FULL size; `"0"`=remove); **`sequence_num` is per-CONNECTION,
+  +1 on every message incl. heartbeats/acks** → gap = jump > 1 (checked over the whole stream, not filtered to
+  `l2_data`); first `l2_data` is a `snapshot` (COMPLETE baseline → `synced=True`); resync is in-band (resubscribe
+  `level2` → fresh snapshot). L2 price-level book (`PriceLevelBook`), not order-id. Writer path
+  `coinbase_advanced/level2`, feed `coinbase-advanced-level2`, `required_env=()`. **PARTIAL:** exact
+  max-connections / message-rate limits not recorded (not load-bearing for one BTC-USD feed).
 - **Bitstamp VERIFIED 2026-10-16** (Berk fetched the primary WS doc): endpoint `wss://ws.bitstamp.net`,
   subscribe envelope `{"event":"bts:subscribe","data":{"channel":"live_orders_<market>"}}`, ≤1024 channels/conn.
   **Gap mechanism corrected:** `live_orders` events carry top-level **`event_id`/`pre_event_id`** ("allow you to

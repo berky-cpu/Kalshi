@@ -56,6 +56,11 @@ def _is_recorded_complete_snapshot(venue: str, msg: Any) -> bool:
         return str(msg.get("topic", "")).startswith("orderbook.") and msg.get("type") == "snapshot"
     if v == "kalshi":
         return msg.get("type") == "orderbook_snapshot"
+    if v == "coinbase_advanced":
+        return msg.get("channel") == "l2_data" and any(
+            isinstance(e, dict) and e.get("type") == "snapshot"
+            for e in (msg.get("events") or [])
+        )
     return False
 
 

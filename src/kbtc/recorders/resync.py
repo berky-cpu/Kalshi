@@ -50,7 +50,7 @@ import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from . import binance, bitstamp, bybit, coinbase, kalshi, kraken
+from . import binance, bitstamp, bybit, coinbase, coinbase_advanced, kalshi, kraken
 from .base import MessageProcessor, logger, now_ns
 
 JsonFetch = Callable[[str], Awaitable[Any]]
@@ -290,6 +290,14 @@ def bybit_resync_builder(
     product: str = "BTCUSDT", depth: int = 50
 ) -> Callable[[WsSend], Resnapshot]:
     frames = bybit.resubscribe_messages(product, depth)
+    return lambda send: ResubscribeResyncer(frames, send)
+
+
+def coinbase_advanced_resync_builder(
+    product: str = "BTC-USD",
+) -> Callable[[WsSend], Resnapshot]:
+    """In-band: resubscribe to ``level2`` → a fresh ``snapshot`` rebuilds the book (no REST fetch)."""
+    frames = coinbase_advanced.resubscribe_messages(product)
     return lambda send: ResubscribeResyncer(frames, send)
 
 
