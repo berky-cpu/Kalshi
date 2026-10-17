@@ -73,7 +73,15 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   (Phase-2 empirical); no live poll loop / systemd unit yet (→ relates to 1.3).
 - [ ] **1.3** VPS deployment (`deploy/`): systemd units, log rotation, disk alarms, daily
   upload/backup. *Accept:* 72 h unattended run with < 0.1 % gap time per feed.
-- [ ] **1.4** Health report script: per-feed uptime, message rates, gaps, disk usage.
+- [x] **1.4** Health report script: per-feed uptime, message rates, gaps, disk usage.
+  *Done 2026-10-16:* `src/kbtc/recorders/health.py` + CLI + tests (92 pass). Review
+  [REV-007](notes/reviews/REV-007-roadmap-1.4-health.md) (PASS, Round 2). Per-feed disk/rate/coverage +
+  sequence gaps (by replaying recorded raw through the real per-venue processors). Coverage/rate count
+  **data frames only** (control/heartbeat frames excluded) so a stalled-but-heartbeating feed can't look
+  healthy. **1.3's gate = `gap_time_fraction < 0.1% AND msgs_per_s >= floor`** (the `healthy` flag), not
+  uptime alone; CLI exits non-zero on any unhealthy feed.
+  *Backlog (before gating Binance on 1.3):* add a Binance `depthUpdate` jump fixture for `_prime_binance`;
+  per-feed `min_rate` for sparse feeds.
 
 ## Phase 2 — Normalize + replicate the index (owner: data-engineer, index-replicator)
 
