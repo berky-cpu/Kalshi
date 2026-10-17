@@ -56,6 +56,54 @@ from .base import MessageProcessor, logger, now_ns
 JsonFetch = Callable[[str], Awaitable[Any]]
 WsSend = Callable[[str], Awaitable[None]]
 Resnapshot = Callable[[MessageProcessor], Awaitable[None]]
+# ``persist(tagged_record_json: str, recv_ts_ns: int) -> None``: wired by ``run_recorder`` to
+# ``writer.write`` so a fetched REST snapshot is written into the SAME recording (see below).
+Persist = Callable[[str, int], None]
+
+
+# --------------------------------------------------------------------------------------
+# Persisted REST-snapshot envelope (ROADMAP 1.1c).
+#
+# PROBLEM: Coinbase/Binance/Bitstamp seed their book from a REST snapshot that the recorder used to
+# apply only in memory. ``run_recorder`` wrote only inbound WS frames, so an offline replay (the
+# normalizer) started from an empty book and could reconstruct only POST-recording deltas — those
+# three BRTI constituents' books were structurally incomplete offline (``synced=False``).
+#
+# FIX: when a ``RestSnapshotResyncer`` fetches a snapshot (BOTH initial sync and gap resync), it
+# also writes that snapshot into the recording via the SAME writer, wrapped in this tagged
+# envelope and stamped with ``recv_ts_ns = time.time_ns()`` at FETCH time so it is ordered in the
+# stream just before the deltas it precedes. On replay the normalizer routes ``body`` to
+# ``processor.apply_snapshot`` to establish a COMPLETE baseline.
+#
+# TAG DESIGN: the sentinel key ``__kbtc_rest_snapshot__`` cannot collide with any real venue WS
+# payload. Every crypto venue sends either a JSON object whose keys are venue field names
+# (``type``/``e``/``event``/``channel``/``topic``/...) or a positional JSON array (Coinbase
+# level3). None uses a dunder-wrapped sentinel key, so ``parse_rest_snapshot_record`` is
+# unambiguous, and a WS-only (old-format) recording simply never contains this key — backward
+# compatible. The envelope is public order-book data only; no secret is ever persisted.
+# --------------------------------------------------------------------------------------
+REST_SNAPSHOT_TAG = "__kbtc_rest_snapshot__"
+
+
+def make_rest_snapshot_record(venue: str, channel: str, body: Any) -> str:
+    """Wrap a fetched REST snapshot ``body`` in the tagged envelope and serialize to a JSON line.
+
+    ``body`` is the raw REST snapshot JSON (as returned by ``fetch``), stored UNTOUCHED under
+    ``body`` so replay feeds it straight to ``apply_snapshot``.
+    """
+    return json.dumps(
+        {REST_SNAPSHOT_TAG: 1, "venue": venue, "channel": channel, "body": body},
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+def parse_rest_snapshot_record(msg: Any) -> dict | None:
+    """If ``msg`` is a persisted REST-snapshot envelope, return it (``venue``/``channel``/``body``);
+    otherwise ``None``. ``msg`` is the already-parsed record (a dict for the envelope)."""
+    if isinstance(msg, dict) and msg.get(REST_SNAPSHOT_TAG):
+        return msg
+    return None
 
 
 # --------------------------------------------------------------------------------------
@@ -94,14 +142,29 @@ class RestSnapshotResyncer:
 
     resync_on_connect = True
 
-    def __init__(self, url: str, fetch: JsonFetch | None = None) -> None:
+    def __init__(
+        self, url: str, fetch: JsonFetch | None = None, *, persist: Persist | None = None
+    ) -> None:
         self.url = url
         self.fetch = fetch or default_fetch
+        # Injected by ``run_recorder`` (wired to ``writer.write``). When set, the fetched snapshot
+        # is PERSISTED into the recording (tagged) so an offline replay can rebuild a COMPLETE
+        # book. When None (initial offline construction / unit tests that only check the apply),
+        # nothing is written — the in-memory apply is unchanged. The in-band resyncers below have
+        # no ``persist`` attribute, so ``run_recorder`` never wires one to them (ROADMAP 1.1c).
+        self.persist = persist
 
     async def __call__(self, processor: MessageProcessor) -> None:
         processor.begin_resync()
         snapshot = await self.fetch(self.url)
-        processor.apply_snapshot(snapshot, now_ns())
+        recv_ts_ns = now_ns()  # stamp at FETCH time (orders the record before the deltas it precedes)
+        # Persist BEFORE applying so the recording never reflects a book state whose seeding
+        # snapshot was not written. Tagged with the processor's own venue/channel so replay routes
+        # it to the right feed. Works identically for INITIAL sync and gap RESYNC (one code path).
+        if self.persist is not None:
+            record = make_rest_snapshot_record(processor.venue, processor.channel, snapshot)
+            self.persist(record, recv_ts_ns)
+        processor.apply_snapshot(snapshot, recv_ts_ns)
 
 
 class ResubscribeResyncer:

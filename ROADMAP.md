@@ -111,14 +111,15 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   *Open:* Coinbase/Binance/Bitstamp books are flagged **`synced=False`** (the recorder doesn't persist
   the REST baseline — see 1.1c); their exact checkpointing is deferred to the live run. Bybit checkpoint
   informational; Kalshi schema + Binance aggTrade mapping UNVERIFIED (1.1b / feeds.md F-2).
-- [ ] **1.1c Persist REST snapshots into recordings (recorder completeness).** The recorder applies REST
-  order-book snapshots (initial sync + resync) in memory but writes only inbound WS frames, so
-  Coinbase/Binance/Bitstamp recordings cannot rebuild a COMPLETE book offline (missing pre-recording
-  resting orders). The 2.1 `synced=False` marker makes this visible, not silently wrong. *Accept:* the
-  recorder writes each REST snapshot into the stream as a tagged record; the normalizer consumes it and
-  emits `synced=True` complete books; a replay test rebuilds a complete book from a recording that opens
-  mid-stream. **Required before those three constituents' books are trusted in the 72 h run / Phase 2.2.**
-  Owner: data-engineer.
+- [x] **1.1c Persist REST snapshots into recordings (recorder completeness).** The recorder applies REST
+  order-book snapshots (initial sync + resync) in memory but wrote only inbound WS frames, so
+  Coinbase/Binance/Bitstamp recordings could not rebuild a COMPLETE book offline.
+  *Done 2026-10-17:* the REST resyncer now persists each snapshot into the stream as a tagged envelope
+  (`__kbtc_rest_snapshot__`); the normalizer consumes it → `synced=True` complete books; backward-compatible
+  with old snapshot-less recordings. Review [REV-011](notes/reviews/REV-011-roadmap-1.1c-snapshot-persistence.md)
+  (PASS). Replay test rebuilds a complete book (pre-existing resting orders present) from a recording that opens
+  mid-stream; cross-wired/malformed snapshots are skipped+logged, not crashed. **161 tests pass.** Live
+  per-venue REST JSON shape is exercised by the 1.3 VPS run (`run_recorder` persist wiring is `# pragma: no cover`).
 - [ ] **2.2** BRTI replica from constituent books per `docs/brti-spec.md`.
   *Accept:* tracking error vs. published settlement values reported (median, p95, max);
   target p95 < $5 on settlement averages.

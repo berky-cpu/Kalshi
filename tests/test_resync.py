@@ -166,6 +166,85 @@ def test_bitstamp_reseed_floor_drops_stale_events_no_double_apply():
 
 
 # --------------------------------------------------------------------------------------
+# (1c) Persisting the REST snapshot into the recording (ROADMAP 1.1c).
+#
+# The resyncer now writes its fetched snapshot into the SAME recording via an injected ``persist``
+# callback (wired by run_recorder to writer.write), tagged so replay can rebuild a COMPLETE book.
+# --------------------------------------------------------------------------------------
+def test_rest_resyncer_persists_tagged_snapshot_and_applies():
+    p = CoinbaseProcessor(product="BTC-USD", channel="full")
+    persisted: list[tuple[str, int]] = []
+
+    def persist(record: str, ts: int) -> None:
+        persisted.append((record, ts))
+
+    snapshot = {"sequence": 100,
+                "bids": [["27000.00", "1.0", "s1"]],
+                "asks": [["27010.00", "2.0", "s2"]]}
+    resyncer = R.RestSnapshotResyncer(
+        R.coinbase_snapshot_url("BTC-USD"), _fetcher(snapshot), persist=persist)
+    _run(resyncer(p))
+
+    # Applied to the processor (unchanged in-memory behaviour).
+    assert p.synced is True and p.sequence == 100
+    assert "s1" in p.book.orders and "s2" in p.book.orders
+
+    # Persisted EXACTLY ONE tagged record, stamped with a real recv_ts.
+    assert len(persisted) == 1
+    record, ts = persisted[0]
+    assert isinstance(ts, int) and ts > 0
+    parsed = json.loads(record)
+    assert parsed[R.REST_SNAPSHOT_TAG] == 1
+    assert parsed["venue"] == "coinbase" and parsed["channel"] == "full"
+    assert parsed["body"] == snapshot  # raw REST snapshot stored UNTOUCHED
+
+    # The parse helper round-trips the envelope; a normal WS frame is NOT mistaken for one.
+    assert R.parse_rest_snapshot_record(parsed)["body"] == snapshot
+    assert R.parse_rest_snapshot_record(_cb_open(101, "x", "1.0")) is None
+
+
+def test_rest_resyncer_persists_on_both_initial_sync_and_gap_resync():
+    # ONE code path serves BOTH initial sync and gap resync, so a second invocation (after a gap)
+    # persists a second tagged snapshot — recordings re-anchor completely on every resync.
+    p = BinanceDepthProcessor(product="BTCUSDT")
+    persisted: list[tuple[str, int]] = []
+    snap = {"lastUpdateId": 1000, "bids": [["27000.0", "1.0"]], "asks": [["27010.0", "1.0"]]}
+    resyncer = R.RestSnapshotResyncer(
+        R.binance_snapshot_url("BTCUSDT"), _fetcher(snap),
+        persist=lambda rec, ts: persisted.append((rec, ts)))
+
+    _run(resyncer(p))  # INITIAL sync
+    assert len(persisted) == 1 and p.last_update_id == 1000
+
+    # A first-event window miss flags a resync; the IO layer clears the flag and re-calls.
+    p.process({"e": "depthUpdate", "U": 1001, "u": 1005, "b": [], "a": []}, 1)
+    assert p.needs_resnapshot is True
+    p.clear_resnapshot()
+    _run(resyncer(p))  # gap RESYNC — same resyncer, same code path
+
+    assert len(persisted) == 2
+    assert all(json.loads(r)[R.REST_SNAPSHOT_TAG] == 1 for r, _ in persisted)
+    assert all(json.loads(r)["body"] == snap for r, _ in persisted)
+
+
+def test_rest_resyncer_without_persist_applies_and_in_band_has_no_persist_seam():
+    # No persist wired (offline construction / tests that only check the apply): the in-memory
+    # apply is unchanged and nothing is written.
+    p = CoinbaseProcessor(product="BTC-USD", channel="full")
+    resyncer = R.RestSnapshotResyncer(R.coinbase_snapshot_url("BTC-USD"),
+                                      _fetcher({"sequence": 5, "bids": [], "asks": []}))
+    assert resyncer.persist is None
+    _run(resyncer(p))
+    assert p.sequence == 5 and p.synced is True
+
+    # In-band resyncers expose NO ``persist`` attribute, so run_recorder never wires one to them
+    # (their snapshot rides the WS stream and is recorded as a normal frame).
+    send = _FakeSend()
+    assert not hasattr(R.bybit_resync_builder("BTCUSDT", depth=50)(send), "persist")
+    assert not hasattr(R.kalshi_resync_builder(tickers=["KXBTC15M"])(send), "persist")
+
+
+# --------------------------------------------------------------------------------------
 # (2) In-band-resubscribe venues — frames + rebuild + thrash suppression (F4).
 # --------------------------------------------------------------------------------------
 def test_kraken_resubscribe_frame_rebuild_and_no_thrash():
