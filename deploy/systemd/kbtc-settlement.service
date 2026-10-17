@@ -1,0 +1,28 @@
+# Periodic KXBTC15M settlement ground-truth capture (ROADMAP 1.2). Triggered by the matching
+# .timer. READS ONLY from Kalshi production REST; no order path. Oneshot: run, write, exit.
+[Unit]
+Description=kbtc KXBTC15M settlement capture
+Documentation=file:///opt/kbtc/docs/facts.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=kbtc
+Group=kbtc
+WorkingDirectory=/opt/kbtc
+EnvironmentFile=-/etc/kbtc/env
+# --lookback-min 30 comfortably covers two 15-min boundaries per run so nothing is missed if a
+# run is skipped; capture is idempotent (seen-set seeded from prior output).
+ExecStart=/opt/kbtc/.venv/bin/python -m kbtc.recorders.settlement --root /opt/kbtc/data/raw --lookback-min 30
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kbtc-settlement
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+RestrictAddressFamilies=AF_INET AF_INET6
+ReadWritePaths=/opt/kbtc/data

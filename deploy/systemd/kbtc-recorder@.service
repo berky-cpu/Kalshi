@@ -1,0 +1,64 @@
+# One market-data recorder per feed, e.g.:
+#   systemctl enable --now kbtc-recorder@coinbase-full
+#   systemctl enable --now kbtc-recorder@coinbase-level3
+#   systemctl enable --now kbtc-recorder@kraken-level3
+#   systemctl enable --now kbtc-recorder@bitstamp-live_orders
+#   systemctl enable --now kbtc-recorder@binance-perp
+#   systemctl enable --now kbtc-recorder@bybit-perp
+#   systemctl enable --now kbtc-recorder@kalshi
+#
+# %i is the feed name passed straight to `python -m kbtc.recorders.run <feed>`.
+# READS ONLY: this records market data; there is NO order path in the runner (CLAUDE.md rule 1).
+[Unit]
+Description=kbtc market-data recorder (%i)
+Documentation=file:///opt/kbtc/docs/feeds.md
+After=network-online.target
+Wants=network-online.target
+# Don't let a persistently crash-looping feed spin forever: StartLimit trips -> unit enters failed.
+StartLimitIntervalSec=300
+StartLimitBurst=20
+
+[Service]
+Type=simple
+User=kbtc
+Group=kbtc
+WorkingDirectory=/opt/kbtc
+# Credentials (COINBASE_*, KRAKEN_*, KALSHI_*) are read from the environment ONLY. This file is
+# chmod 600, owned by root, NEVER committed to the repo. No `-` prefix => a missing /etc/kbtc/env
+# is a hard start failure for EVERY feed (fail-closed, intentional): even the public feeds
+# (bitstamp/binance/bybit) won't start without the env file present, so a mis-provisioned box
+# fails loudly rather than recording unauthenticated/misconfigured. Create the file (see
+# deploy/env.example) before enabling any instance.
+EnvironmentFile=/etc/kbtc/env
+ExecStart=/opt/kbtc/.venv/bin/python -m kbtc.recorders.run %i --root /opt/kbtc/data/raw
+
+# Resilience: always restart; jittered WS reconnect is handled in-process, this covers hard exits.
+Restart=always
+RestartSec=5
+# Graceful shutdown: run.py traps SIGTERM, stops the loop, and flushes the final zstd frame.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Logging -> journald (no files; see deploy/logrotate/README.md). Tag per-instance for filtering.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kbtc-recorder-%i
+
+# Hardening: least privilege for a network reader that writes only under the data dir.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+# The ONLY writable path: the raw-data tree.
+ReadWritePaths=/opt/kbtc/data
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,14 @@
+# Capture settlements every 5 minutes. KXBTC15M closes every 15 min and finalizes a few seconds
+# after close; a 5-min cadence with a 30-min lookback captures each boundary reliably.
+[Unit]
+Description=Run kbtc settlement capture every 5 minutes
+
+[Timer]
+OnCalendar=*:0/5
+# Catch up after downtime so no boundary is skipped on reboot.
+Persistent=true
+RandomizedDelaySec=30
+AccuracySec=15
+
+[Install]
+WantedBy=timers.target

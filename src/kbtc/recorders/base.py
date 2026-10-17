@@ -339,7 +339,23 @@ class MessageProcessor(ABC):
 # --------------------------------------------------------------------------------------
 @dataclass
 class IoConfig:
-    """Everything the generic driver needs from a venue adapter."""
+    """Everything the generic driver needs from a venue adapter.
+
+    ``header_factory`` and ``subscribe_factory`` exist for feeds whose auth is bound to the
+    *moment of connection* and must be refreshed on every (re)connect — they are called once per
+    connection, never cached:
+
+    * ``header_factory() -> dict`` supplies WebSocket **handshake** headers (Kalshi's
+      timestamp+signature RSA-PSS/Ed25519 auth), recomputed per connect so a long-lived reconnect
+      never replays a stale signature. ``None`` ⇒ no extra headers (all public crypto feeds).
+    * ``subscribe_factory() -> list[dict]`` replaces the static ``subscribe_messages`` when the
+      subscribe payload embeds a short-lived credential (Kraken's ``GetWebSocketsToken`` token,
+      valid ~900 s) that must be re-fetched before each (re)connect. ``None`` ⇒ use the static
+      ``subscribe_messages``.
+
+    Both default to ``None``, so existing public-feed adapters are unaffected. Neither ever logs a
+    credential (CLAUDE.md hard rule 2); they are reads-only auth for market-data subscriptions.
+    """
 
     venue: str
     channel: str
@@ -348,6 +364,8 @@ class IoConfig:
     ping_message: str | None = None
     ping_interval_s: float | None = None
     open_timeout_s: float = 10.0
+    header_factory: Any = None  # Callable[[], dict] | None — fresh handshake headers per connect
+    subscribe_factory: Any = None  # Callable[[], list[dict]] | None — fresh subscribe per connect
 
 
 async def run_recorder(  # pragma: no cover - requires a live socket
@@ -392,8 +410,20 @@ async def run_recorder(  # pragma: no cover - requires a live socket
     while stop_event is None or not stop_event.is_set():
         url = config.urls[attempt % len(config.urls)]
         try:
-            async with websockets.connect(url, open_timeout=config.open_timeout_s) as ws:
-                for msg in config.subscribe_messages:
+            # Fresh handshake headers per connect (Kalshi auth); None for public feeds. Computed
+            # before connect and never logged.
+            headers = config.header_factory() if config.header_factory else None
+            async with websockets.connect(
+                url, open_timeout=config.open_timeout_s, additional_headers=headers
+            ) as ws:
+                # Fresh subscribe per connect when a short-lived token is embedded (Kraken);
+                # otherwise the static list. Never logged.
+                subs = (
+                    config.subscribe_factory()
+                    if config.subscribe_factory
+                    else config.subscribe_messages
+                )
+                for msg in subs:
                     await ws.send(json.dumps(msg))
                 attempt = 0  # connected cleanly; reset backoff
 

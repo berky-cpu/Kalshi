@@ -1,0 +1,11 @@
+# Check disk usage every 10 minutes.
+[Unit]
+Description=Run kbtc disk-usage alarm every 10 minutes
+
+[Timer]
+OnCalendar=*:0/10
+Persistent=false
+AccuracySec=30
+
+[Install]
+WantedBy=timers.target

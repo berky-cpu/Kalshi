@@ -430,3 +430,64 @@ class SettlementCapture:
             log_issue(issue, self.log)
         self.issues.extend(issues)
         return issues
+
+
+# ---------------------------------------------------------------------------------------
+# CLI entrypoint (ROADMAP 1.3): ``python -m kbtc.recorders.settlement`` on a systemd timer.
+# Reads MARKET DATA ONLY from Kalshi production REST; no order path. Public data needs no auth.
+# ---------------------------------------------------------------------------------------
+def main(
+    argv: list[str] | None = None,
+    *,
+    fetch: Fetcher = _default_fetch,
+    clock_ns: Callable[[], int] = now_ns,
+) -> int:
+    """Capture KXBTC15M settlements whose ``close_time`` falls in the recent lookback window.
+
+    Designed for a periodic timer: it enumerates the just-closed boundaries, writes any newly
+    settled market once (idempotent via ``load_seen`` over prior output), and LOGS any boundary
+    that is still unsettled or missing. A still-unsettled very-recent window is NORMAL (settlement
+    lags close by a few seconds), so this exits 0 on completeness issues — only a usage/IO error is
+    non-zero. ``fetch``/``clock_ns`` are injectable for tests (no network).
+    """
+    import argparse
+    import glob
+    import sys
+    from pathlib import Path
+
+    from .writer import RotatingZstdWriter, read_records
+
+    p = argparse.ArgumentParser(
+        prog="python -m kbtc.recorders.settlement",
+        description="Capture KXBTC15M settlement ground truth (reads only; no order path).",
+    )
+    p.add_argument("--root", default="data/raw", help="data root (default: data/raw)")
+    p.add_argument("--lookback-min", type=float, default=30.0,
+                   help="capture boundaries that closed within the last N minutes (default: 30)")
+    p.add_argument("--base", default=PROD_BASE, help="Kalshi REST base (reads only)")
+    p.add_argument("--no-resume", action="store_true",
+                   help="do not seed 'seen' from existing output (re-writes already-captured)")
+    args = p.parse_args(argv)
+
+    end_ns = clock_ns()
+    start_ns = end_ns - int(args.lookback_min * 60 * 1_000_000_000)
+
+    writer = RotatingZstdWriter(args.root, "kalshi", "settlement")
+    cap = SettlementCapture(writer, fetch=fetch, base=args.base, clock_ns=clock_ns)
+    try:
+        if not args.no_resume:
+            existing = sorted(glob.glob(
+                str(Path(args.root) / "kalshi" / "settlement" / "**" / "*.jsonl.zst"),
+                recursive=True,
+            ))
+            cap.load_seen(existing, read_records)
+        cap.capture_range(start_ns, end_ns)
+    finally:
+        writer.close()
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    import sys
+
+    sys.exit(main())

@@ -1,0 +1,29 @@
+# Periodic recorder health report (ROADMAP 1.4). Exits non-zero when ANY feed is unhealthy
+# (stale, too quiet, or gappy), which marks the systemd unit failed -> OnFailure alert can fire.
+[Unit]
+Description=kbtc recorder health report
+Documentation=file:///opt/kbtc/docs/feeds.md
+# Wire an alert (email/push/webhook) by dropping in an OnFailure= handler unit, e.g.:
+#   OnFailure=kbtc-alert@%n.service
+
+[Service]
+Type=oneshot
+User=kbtc
+Group=kbtc
+WorkingDirectory=/opt/kbtc
+EnvironmentFile=-/etc/kbtc/env
+# Window the report to the last 15 min (epoch ns, which the CLI accepts) so a single stalled feed
+# trips promptly instead of being diluted across the whole history. GNU `date` is standard on
+# Ubuntu; `%%` escapes `%` for systemd.
+ExecStart=/bin/sh -c '/opt/kbtc/.venv/bin/python -m kbtc.recorders.health --root /opt/kbtc/data/raw --start $(date -u -d "15 min ago" +%%s%%N)'
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kbtc-health
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# Health only READS the data tree; no write access needed.
+ReadOnlyPaths=/opt/kbtc/data

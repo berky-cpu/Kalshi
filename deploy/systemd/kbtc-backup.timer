@@ -1,0 +1,12 @@
+# Back up the previous day's raw data once a day, shortly after midnight UTC (after the day has
+# fully rolled over so the prior day's hourly files are all closed).
+[Unit]
+Description=Daily kbtc raw-data backup
+
+[Timer]
+OnCalendar=*-*-* 00:20:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
