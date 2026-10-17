@@ -178,55 +178,56 @@ PARTIAL: endpoint host-name conflict (`ws-l3` vs `ws-auth`); resync is inferred 
 
 ## 3. Bitstamp (BRTI constituent) — `live_orders_{pair}` channel
 
-> **Primary-source access failure.** The official WebSocket v2 page `https://www.bitstamp.net/websocket/v2/`
-> is behind an **Incapsula bot wall** (returns a 212-byte JS-challenge shell with `noindex,nofollow`)
-> to both `curl` and WebFetch, so the canonical channel page could **not** be read this session.
-> The fields and the gap-recovery mechanism below are confirmed from Bitstamp's **reachable primary
-> page** — the HTTP API reference `https://www.bitstamp.net/api/` — which documents the same order
-> events and the `order_data` backfill endpoints. The subscribe envelope and endpoint host are from
-> well-known usage / a secondary mirror and are flagged PARTIAL. **Overall venue status: PARTIAL.**
+> **Primary source now read (2026-10-16).** The official WebSocket v2 page was previously behind an
+> Incapsula bot wall; Berk fetched it directly. Endpoint, subscribe envelope, and the gap mechanism
+> below are now **VERIFIED from the primary Bitstamp WS v2 doc**. **Overall venue status: VERIFIED.**
 
-**Endpoint:** `wss://ws.bitstamp.net` (PARTIAL — not confirmable from the blocked primary page).
+**Endpoint:** `wss://ws.bitstamp.net` (VERIFIED).
 
-**Auth:** `live_orders_{pair}` is a **public** market-data channel (no auth). PARTIAL (inferred; the
-REST `POST /api/v2/order_data/` public variant corroborates that order data is public).
+**Auth:** `live_orders_{pair}` is a **public** market-data channel (no auth). VERIFIED.
 
-**Subscribe message (PARTIAL — envelope from known usage / mirror, not the blocked primary page):**
+**Subscribe message (VERIFIED):**
 ```json
 {"event": "bts:subscribe", "data": {"channel": "live_orders_btcusd"}}
 ```
 Channel format `live_orders_{pair}`, pair **lowercase** (`btcusd`). Unsubscribe: `{"event":"bts:unsubscribe","data":{"channel":"live_orders_btcusd"}}`.
-Bitstamp also sends a `bts:request_reconnect` control event telling the client to reconnect (PARTIAL).
+Bitstamp also sends a `bts:request_reconnect` control event telling the client to reconnect (VERIFIED).
+**Up to 1024 channels per connection** (VERIFIED).
 
-**Events + fields (VERIFIED from the Bitstamp REST `/api/` primary, which returns the same
-`order_created` event schema):** event types **`order_created`**, **`order_changed`**,
-**`order_deleted`**. Each event's `data` object carries: `id`, `id_str`, `order_type`
-(**0 = buy, 1 = sell**), `datetime`, `microtimestamp`, `amount`, `price` (plus `amount_str`/`price_str`),
-and `order_source`.
+**Events + fields (VERIFIED from the primary WS v2 doc):** event types **`order_created`**,
+**`order_changed`**, **`order_deleted`**. Each frame carries top-level **`event`**, **`channel`**,
+**`event_id`** (UUID string), **`pre_event_id`** (UUID string), and a `data` object with: `id`,
+`id_str`, `order_type` (**0 = buy, 1 = sell**), `datetime`, `microtimestamp`, `amount`, `amount_str`,
+`amount_at_create`, `amount_traded`, `price`, `price_str`, `order_source`.
 
-**Sequence / gap detection (VERIFIED mechanism, from REST primary):** Bitstamp orders events by a
-**MarketEventID** (a **hex** id). The REST gap-recovery endpoints
-`POST /api/v2/order_data/` (public) and `POST /api/v2/account_order_data/` (private) take
-**`since_id` (inclusive)** and **`until_id` (exclusive)** as **hex MarketEventIDs** and return the
-order events in that range (defaults: `until_id` = now, `since_id` = 24 h before `until_id`).
-- **Primary gap-detection field: `microtimestamp`** (monotonic per channel) for ordering on the live
-  stream; **MarketEventID** (`since_id`) is the key for REST backfill of any gap.
-- The exact websocket field name tying a live event to its MarketEventID could not be read from the
-  blocked channel page → PARTIAL.
+**Sequence / gap detection (VERIFIED):** the live `live_orders` stream carries top-level
+**`event_id`** and **`pre_event_id`**; the doc states they "allow you to detect and recover" on
+reconnect. The gap signal is a **chain**: each new event's **`pre_event_id` must equal the previous
+event's `event_id`** (exactly analogous to Binance futures `pu == prev.u`). A mismatch ⇒ a dropped
+event ⇒ resync.
+- **Primary gap-detection field: `pre_event_id` → `event_id` chain.**
+- `microtimestamp` (monotonic per channel) is a **secondary** ordering sanity check only.
+- REST backfill: `POST /api/v2/order_data/` (public) / `POST /api/v2/account_order_data/` (private)
+  take **`since_id` (inclusive)** / **`until_id` (exclusive)** as **MarketEventIDs** and return the
+  order events in that range (defaults: `until_id` = now, `since_id` = 24 h before).
 
-**Snapshot + resync (PARTIAL; REST backfill is primary-confirmed):** `live_orders` has **no
-snapshot message**. Seed the book from the REST order book
-`GET https://www.bitstamp.net/api/v2/order_book/btcusd/` (the detail/`group=2` variant gives
-order-level detail). On a detected gap or reconnect, re-fetch the REST order book and/or call
-`POST /api/v2/order_data/` with `since_id` = last-seen MarketEventID to replay the missed order
-events, then resume the live stream. (Exact snapshot↔stream reconciliation not confirmable from the
-blocked page → PARTIAL.)
+> **Do not conflate channels.** The `microtimestamp`-sequenced-diff behaviour ("discard buffered
+> events older than the snapshot") belongs to the SEPARATE **`detail/diff_order_book`** channel, NOT
+> `live_orders`. `live_orders` has no snapshot message and is reconciled via the event_id chain + the
+> REST order book / `order_data` backfill.
 
-**Limits / heartbeat:** not documented on any reachable page → UNVERIFIED.
+**Snapshot + resync (VERIFIED):** `live_orders` has **no snapshot message**. Seed the book from the
+REST order book `GET https://www.bitstamp.net/api/v2/order_book/btcusd/` (detail/`group=2` variant
+gives order-level detail). On a detected gap (`event_id` chain break) or reconnect, re-fetch the REST
+order book and/or call `POST /api/v2/order_data/` with `since_id` = last-seen MarketEventID to replay
+the missed order events, then resume the live stream.
 
-**Status: PARTIAL** — event schema + MarketEventID/`order_data` backfill VERIFIED from the reachable
-REST primary; endpoint host, subscribe envelope, snapshot reconciliation, and limits unconfirmed
-because the WebSocket v2 page is Incapsula-blocked.
+**Limits:** ≤ **1024 channels per connection** (VERIFIED). Heartbeat cadence not needed for a
+read-only recorder (server sends `bts:request_reconnect` when it wants a reconnect).
+
+**Status: VERIFIED** — endpoint, subscribe envelope, event schema (incl. `event_id`/`pre_event_id`),
+the chain-based gap mechanism, and the REST order-book/`order_data` resync path all confirmed from
+the primary Bitstamp WS v2 doc (2026-10-16).
 
 ---
 
@@ -360,7 +361,7 @@ fixed `args` count limit for linear. Per-connection request-count limit not stat
 |---|---|---|---|---|---|---|
 | **Coinbase Exchange** `full`/`level3` | constituent | `wss://ws-direct.exchange.coinbase.com` | API key + HMAC-SHA256 (reqd since 2023-07-01) | **`sequence`** (jump > 1) | REST `/products/BTC-USD/book?level=3`, discard msgs ≤ snapshot `sequence`, replay | VERIFIED (`level3` resync + heartbeat PARTIAL) |
 | **Kraken** v2 `level3` | constituent | `wss://ws-l3.kraken.com/v2` (⚠ vs `ws-auth…`) | REST `GetWebSocketsToken` → `token` in subscribe | **`checksum`** (CRC32 top-10/side) | subscribe `snapshot:true`; on checksum mismatch resubscribe | VERIFIED (endpoint host + resync PARTIAL) |
-| **Bitstamp** `live_orders_{pair}` | constituent | `wss://ws.bitstamp.net` (unconfirmed) | public (market data) | **`microtimestamp`** + **MarketEventID** (`since_id` backfill) | REST order book seed; `POST /api/v2/order_data/` `since_id` replay | PARTIAL (WS v2 page Incapsula-blocked) |
+| **Bitstamp** `live_orders_{pair}` | constituent | `wss://ws.bitstamp.net` | public (market data) | **`pre_event_id` → `event_id` chain** (`microtimestamp` secondary) | REST order book seed; `POST /api/v2/order_data/` `since_id` replay | VERIFIED |
 | **Binance** USDⓈ-M `@depth`+`@aggTrade` | lead signal | `wss://fstream.binance.com` | public | **`pu`** (`pu == prev.u`) | REST `fapi/v1/depth?limit=1000` → `lastUpdateId`; `U≤id≤u` align; `pu` chain | VERIFIED resync/`pu` (stream speeds + field example + trades/limits PARTIAL) |
 | **Bybit** v5 linear `orderbook`+`publicTrade` | lead signal | `wss://stream.bybit.com/v5/public/linear` | public | **`type=="snapshot"`** reset (`u`/`seq` monotonic) | reset book on every `snapshot`; reconnect → snapshot | VERIFIED incl. trades (numeric-gap rule PARTIAL) |
 
@@ -370,7 +371,7 @@ fixed `args` count limit for linear. Per-connection request-count limit not stat
 
 | ID | Item | Status | What would close it |
 |---|---|---|---|
-| F-1 | **Bitstamp WebSocket v2 page unreachable.** `https://www.bitstamp.net/websocket/v2/` returns a 212-byte **Incapsula** JS-challenge shell (`noindex,nofollow`) to both `curl` and WebFetch. Endpoint host (`wss://ws.bitstamp.net`), the `bts:subscribe` envelope, snapshot↔stream reconciliation, and connection limits are therefore unconfirmed from primary. Event schema + MarketEventID/`order_data` backfill ARE confirmed from the reachable Bitstamp REST primary (`/api/`). | PARTIAL | Human/authenticated fetch of `bitstamp.net/websocket/v2/`. |
+| F-1 | **Bitstamp WebSocket v2 page — RESOLVED.** Berk fetched the previously Incapsula-blocked page (2026-10-16). Now VERIFIED: endpoint `wss://ws.bitstamp.net`, the `bts:subscribe` envelope, ≤1024 channels/conn, the full event schema incl. top-level `event_id`/`pre_event_id`, and the gap mechanism — a `pre_event_id` → `event_id` chain (not a `microtimestamp` +1 rule). See §3. | VERIFIED | — (closed) |
 | F-2 | **Binance SPA pages unreadable.** `…/websocket-market-streams/Diff-Book-Depth-Streams` and `…/Aggregate-Trade-Streams` (and their `.md` variants) return only the Zudoku HTML shell to WebFetch/`curl`; only `…/How-to-manage-a-local-order-book-correctly.md` served clean markdown. Depth facts recovered from the How-to page (primary) + the official Diff-Book-Depth page text via search. **aggTrade/trade field list and connection/heartbeat limits unconfirmed from primary.** | PARTIAL | Fetch the rendered Binance USDⓈ-M diff-depth, aggTrade, and WS-connection-limits pages (or the `llms-full.txt`). |
 | F-3 | **Coinbase `level3` resync not spelled out.** Docs give the `full`-channel snapshot/replay explicitly; `level3` only "conveys the same data." | PARTIAL | A `level3`-specific resync paragraph in the Coinbase Exchange docs, or an empirical replay test. |
 | F-4 | **Coinbase heartbeat interval = 1 s (documented).** The channels page says the `heartbeat` channel emits a message **every second**; only **max connections** is still not found. | PARTIAL (max-connections only) | Coinbase Exchange doc stating a max-connections limit. |
@@ -395,7 +396,7 @@ fixed `args` count limit for linear. Per-connection request-count limit not stat
 | Kraken — `GetWebSocketsToken` | `https://docs.kraken.com/api/docs/rest-api/get-websockets-token` | read 2026-10-16 | VERIFIED |
 | Kraken — level3 CRC32 checksum guide | `https://docs.kraken.com/exchange/guides/websockets/l3-checksum-v2` | read 2026-10-16 | VERIFIED |
 | Bitstamp — HTTP API reference (order events + `order_data` backfill) | `https://www.bitstamp.net/api/` | read 2026-10-16 | VERIFIED (adjacent primary) |
-| Bitstamp — WebSocket v2 channel page | `https://www.bitstamp.net/websocket/v2/` | **FAILED — Incapsula bot wall** 2026-10-16 | FAILED |
+| Bitstamp — WebSocket v2 channel page (endpoint, subscribe, `event_id`/`pre_event_id` chain) | `https://www.bitstamp.net/websocket/v2/` | read 2026-10-16 (fetched by Berk) | VERIFIED |
 | Binance USDⓈ-M — manage local order book | `https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams/How-to-manage-a-local-order-book-correctly` | read 2026-10-16 (`.md` served markdown) | VERIFIED |
 | Binance USDⓈ-M — diff book depth streams | `https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams/Diff-Book-Depth-Streams` | **page body FAILED (SPA shell)**; stream speeds + U/u/pu field example via search excerpt 2026-10-16 | PARTIAL |
 | Binance USDⓈ-M — aggregate trade streams | `https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams/Aggregate-Trade-Streams` | **FAILED (SPA shell)** 2026-10-16 | FAILED |

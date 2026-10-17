@@ -1,6 +1,6 @@
 {"event":"bts:subscription_succeeded","channel":"live_orders_btcusd","data":{}}
-{"event":"order_created","channel":"live_orders_btcusd","data":{"id":101,"order_type":0,"price":"27000.00","amount":"0.50","microtimestamp":"1000","event_id":"1"}}
-{"event":"order_created","channel":"live_orders_btcusd","data":{"id":102,"order_type":1,"price":"27010.00","amount":"1.00","microtimestamp":"1001","event_id":"2"}}
-{"event":"order_changed","channel":"live_orders_btcusd","data":{"id":101,"order_type":0,"price":"27000.00","amount":"0.25","microtimestamp":"1002","event_id":"3"}}
-{"event":"order_created","channel":"live_orders_btcusd","data":{"id":103,"order_type":0,"price":"26990.00","amount":"2.00","microtimestamp":"1003","event_id":"5"}}
-{"event":"order_deleted","channel":"live_orders_btcusd","data":{"id":102,"order_type":1,"price":"27010.00","amount":"1.00","microtimestamp":"1004","event_id":"6"}}
+{"event":"order_created","channel":"live_orders_btcusd","event_id":"e1","pre_event_id":"e0","data":{"id":101,"order_type":0,"price":"27000.00","amount":"0.50","microtimestamp":"1000"}}
+{"event":"order_created","channel":"live_orders_btcusd","event_id":"e2","pre_event_id":"e1","data":{"id":102,"order_type":1,"price":"27010.00","amount":"1.00","microtimestamp":"1001"}}
+{"event":"order_changed","channel":"live_orders_btcusd","event_id":"e3","pre_event_id":"e2","data":{"id":101,"order_type":0,"price":"27000.00","amount":"0.25","microtimestamp":"1002"}}
+{"event":"order_created","channel":"live_orders_btcusd","event_id":"e5","pre_event_id":"e4","data":{"id":103,"order_type":0,"price":"26990.00","amount":"2.00","microtimestamp":"1003"}}
+{"event":"order_deleted","channel":"live_orders_btcusd","event_id":"e6","pre_event_id":"e5","data":{"id":102,"order_type":1,"price":"27010.00","amount":"1.00","microtimestamp":"1004"}}
