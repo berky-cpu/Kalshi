@@ -16,6 +16,61 @@ from kbtc.recorders.base import (
 )
 
 
+def test_ioconfig_max_size_default_preserves_websockets_default():
+    """Default ``max_size`` is the websockets 1 MiB default, so no existing feed is shrunk."""
+    from kbtc.recorders.base import IoConfig
+
+    cfg = IoConfig(venue="v", channel="c", urls=["wss://x"], subscribe_messages=[])
+    assert cfg.max_size == 2 ** 20
+
+
+def test_run_recorder_passes_max_size_into_connect(monkeypatch):
+    """``run_recorder`` is live-only (# pragma: no cover); assert via a fake ``websockets.connect``
+    that it forwards ``config.max_size`` (so the Coinbase unbounded setting actually reaches the
+    socket). The fake records kwargs then raises to break out of the first connect attempt."""
+    import asyncio
+
+    import websockets
+
+    from kbtc.recorders.base import IoConfig, run_recorder
+
+    captured: dict = {}
+
+    def fake_connect(url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        raise RuntimeError("stop after recording connect kwargs")
+
+    monkeypatch.setattr(websockets, "connect", fake_connect)
+
+    async def drive(max_size):
+        cfg = IoConfig(venue="coinbase_advanced", channel="level2", urls=["wss://x"],
+                       subscribe_messages=[], max_size=max_size)
+        stop = asyncio.Event()
+
+        async def runner():
+            # No real backoff sleep: base/max 0 ⇒ delay 0. Stop the loop after the first attempt.
+            await run_recorder(cfg, [], writer=object(), resync_builder=lambda send: None,
+                               backoff=BackoffPolicy(base_s=0, factor=1, max_s=0, jitter=0),
+                               stop_event=stop)
+
+        task = asyncio.create_task(runner())
+        await asyncio.sleep(0)  # let it reach the fake connect and record
+        stop.set()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return captured["max_size"], captured["url"]
+
+    ms, url = asyncio.run(drive(None))
+    assert ms is None and url == "wss://x"  # unbounded forwarded exactly
+    captured.clear()
+    ms2, _ = asyncio.run(drive(2 ** 20))
+    assert ms2 == 2 ** 20  # finite default also forwarded
+
+
 def test_gap_detected_logs_structured(caplog):
     gap = GapDetected("coinbase", "BTC-USD", "full", "sequence jump", 42, expected=105, got=106)
     with caplog.at_level("WARNING", logger="kbtc.recorders"):

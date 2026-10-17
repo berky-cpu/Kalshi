@@ -200,4 +200,9 @@ def io_config(product: str = "BTC-USD") -> IoConfig:
         # Liveness is provided by the server-pushed ``heartbeats`` channel (subscribed above), not a
         # client ping; no client ping frame is required.
         ping_interval_s=None,
+        # The level2 ``snapshot`` is ONE frame carrying the full book (~40k levels, ~1.6 MiB+ on
+        # BTC-USD), which exceeds the websockets 1 MiB default and would be silently rejected →
+        # reconnect-loop with nothing recorded. Unbounded so the complete baseline frame is received
+        # (trusted exchange feed). VERIFIED by a live wire probe from the box (2026-10-17).
+        max_size=None,
     )
