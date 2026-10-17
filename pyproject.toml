@@ -12,6 +12,7 @@ dependencies = [
     "polars>=1.0",
     "pyarrow>=17",
     "sortedcontainers>=2.4.0",
+    "cryptography>=43",
 ]
 
 [dependency-groups]
