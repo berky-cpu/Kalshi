@@ -91,9 +91,14 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   is measured by the 1.4 health report's `gap_time_fraction < 0.1% AND msgs_per_s >= floor` gate.
   *Deployed 2026-10-17* on a Hetzner CPX31 (Ashburn, US-East). **Live & recording 24/7:** Bitstamp
   (live_orders), Kraken (level3), Kalshi settlement capture, + health/disk timers — all healthy (0 gaps).
-  Pending: Coinbase (→ 1.1d, institutional-blocked), backup remote (`KBTC_BACKUP_REMOTE` unset),
-  Kalshi WS book (1.1b). Binance/Bybit NOT deployed (US-IP geo-blocked from Ashburn). The clean 72 h
-  <0.1%-gap acceptance run is still pending (needs the backup wired + a few more feeds).
+  Pending on this box: Coinbase (→ 1.1d, institutional-blocked), backup remote (`KBTC_BACKUP_REMOTE` unset),
+  Kalshi WS book (1.1b).
+  *EU perp box added 2026-10-17* — a Hetzner CX22 (EU, x86_64) because Binance (HTTP 451) and Bybit
+  (HTTP 403) **geo-block the US Ashburn IP** (verified). **Live & recording 24/7:** `binance-perp`
+  (depthUpdate + persisted REST snapshot → complete books) and `bybit-perp` (orderbook.50 snapshot+delta),
+  both public/no-auth, + health/disk timers — health report all-green, **0 seq-gaps, 100% uptime**. This
+  unblocks **2.3**. Pending on this box: B2 backup (same rclone step as Ashburn, Berk's B2 key).
+  The clean 72 h <0.1%-gap acceptance run is still pending (needs backups wired on both boxes).
 - [x] **1.4** Health report script: per-feed uptime, message rates, gaps, disk usage.
   *Done 2026-10-16:* `src/kbtc/recorders/health.py` + CLI + tests (92 pass). Review
   [REV-007](notes/reviews/REV-007-roadmap-1.4-health.md) (PASS, Round 2). Per-feed disk/rate/coverage +
@@ -116,6 +121,14 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   *Open:* Coinbase/Binance/Bitstamp books are flagged **`synced=False`** (the recorder doesn't persist
   the REST baseline — see 1.1c); their exact checkpointing is deferred to the live run. Bybit checkpoint
   informational; Kalshi schema + Binance aggTrade mapping UNVERIFIED (1.1b / feeds.md F-2).
+  *Perf fix 2026-10-17 (surfaced by the first real-data run):* `OrderIdBook.levels()` rescanned every
+  resting order + re-sorted the whole book on **every** event (O(N·M)) — a ~1 hr/hour pathology that hung
+  the normalizer on real Bitstamp L3. Replaced with an incrementally-maintained per-side price→qty
+  aggregate (SortedDict); top-N is now O(n), ~396× faster (≈9 s/hr vs ≈60 min/hr, synthetic). `self.orders`
+  stays authoritative so Kraken CRC/time-priority is byte-identical. Review
+  [REV-013](notes/reviews/REV-013-normalizer-levels-perf.md) (PASS). New dep `sortedcontainers`.
+  **240 tests pass.** The real-data end-to-end normalize re-run (true 2.1 acceptance on live data) is
+  queued now that it's fast enough.
 - [x] **2.1a Replay/health fixes (surfaced by the live run 2026-10-17).** *Done 2026-10-17.*
   (a) **health: exclude the settlement batch dataset** (was reading 0% uptime). (b) **health: per-feed window
   from own first data** + a **cross-feed down-from-start gate** so a late window can't MASK a feed that was
