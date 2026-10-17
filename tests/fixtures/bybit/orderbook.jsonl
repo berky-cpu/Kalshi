@@ -1,0 +1,4 @@
+{"topic":"orderbook.50.BTCUSDT","type":"snapshot","ts":1000,"data":{"s":"BTCUSDT","u":1,"seq":1,"b":[["27000.0","1.0"],["26990.0","2.0"]],"a":[["27010.0","1.5"]]}}
+{"topic":"orderbook.50.BTCUSDT","type":"delta","ts":1001,"data":{"s":"BTCUSDT","u":2,"seq":2,"b":[["27000.0","0.5"]],"a":[["27010.0","0.0"],["27020.0","3.0"]]}}
+{"topic":"orderbook.50.BTCUSDT","type":"delta","ts":1002,"data":{"s":"BTCUSDT","u":3,"seq":3,"b":[["26980.0","4.0"]],"a":[]}}
+{"topic":"orderbook.50.BTCUSDT","type":"snapshot","ts":1003,"data":{"s":"BTCUSDT","u":50,"seq":50,"b":[["27005.0","9.0"]],"a":[["27015.0","1.0"]]}}

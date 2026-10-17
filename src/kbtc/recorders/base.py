@@ -1,0 +1,431 @@
+"""Shared recorder framework: gap events, order books, backoff, and the IO driver.
+
+Design (per ROADMAP 1.1):
+
+* **Pure message processors** (`MessageProcessor` subclasses, one per venue) parse a raw
+  message, update sequence/checksum state, detect gaps, and maintain the order book. They
+  touch no socket and no disk, so a replay test can drive them straight from a fixture.
+  A gap is NEVER silent: the processor builds a structured `GapDetected`, logs it, records
+  it on `self.gaps`, and raises `self.needs_resnapshot` so the IO layer resyncs.
+
+* The **IO layer** (`WebSocketRecorder`) connects, subscribes, stamps every inbound payload
+  with ``recv_ts_ns = time.time_ns()`` *on receipt, before parsing*, persists the raw bytes
+  untouched via ``recorders/writer.py``, then feeds the processor. On ``needs_resnapshot`` (or
+  disconnect) it refetches a snapshot and rebuilds. Reconnects use jittered exponential
+  backoff; heartbeats are venue-configurable.
+
+Prices/quantities are kept as ``Decimal`` for exact book maintenance (crypto venues send
+decimal strings). This module never handles fees or Kalshi cents — those stay in ``fees.py``.
+"""
+from __future__ import annotations
+
+import logging
+import random
+import time
+import zlib
+from abc import ABC, abstractmethod
+from collections import OrderedDict
+from collections.abc import Iterable
+from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
+from typing import Any
+
+logger = logging.getLogger("kbtc.recorders")
+logger.addHandler(logging.NullHandler())
+
+now_ns = time.time_ns
+
+# Normalized side labels used across every venue.
+BID = "bid"
+ASK = "ask"
+
+
+def _dec(x: Any) -> Decimal:
+    """Parse a price/size into Decimal, tolerating str/int/float/Decimal."""
+    if isinstance(x, Decimal):
+        return x
+    try:
+        return Decimal(str(x))
+    except (InvalidOperation, ValueError, TypeError) as exc:  # pragma: no cover - defensive
+        raise ValueError(f"not a numeric value: {x!r}") from exc
+
+
+# --------------------------------------------------------------------------------------
+# Gap events — the heart of the "no silent gap" rule.
+# --------------------------------------------------------------------------------------
+@dataclass(frozen=True)
+class GapDetected:
+    """A structured, loggable record that the live book diverged from the feed.
+
+    ``expected``/``got`` are venue-specific (sequence numbers, checksums, update ids) and may
+    be ``None`` for venues whose resync trigger is a forced snapshot (e.g. Bybit).
+    """
+
+    venue: str
+    product: str
+    channel: str
+    reason: str
+    recv_ts_ns: int
+    expected: Any = None
+    got: Any = None
+
+    def __str__(self) -> str:
+        return (
+            f"GAP venue={self.venue} product={self.product} channel={self.channel} "
+            f"reason={self.reason} expected={self.expected!r} got={self.got!r} "
+            f"recv_ts_ns={self.recv_ts_ns}"
+        )
+
+
+def log_gap(gap: GapDetected, log: logging.Logger = logger) -> None:
+    """Log a gap at WARNING with structured ``extra`` fields (never silent)."""
+    log.warning(
+        "%s",
+        gap,
+        extra={
+            "event": "gap_detected",
+            "venue": gap.venue,
+            "product": gap.product,
+            "channel": gap.channel,
+            "reason": gap.reason,
+            "expected": gap.expected,
+            "got": gap.got,
+            "recv_ts_ns": gap.recv_ts_ns,
+        },
+    )
+
+
+# --------------------------------------------------------------------------------------
+# Reconnect backoff.
+# --------------------------------------------------------------------------------------
+@dataclass
+class BackoffPolicy:
+    """Jittered exponential backoff. ``delay(n)`` is deterministic given ``rng``.
+
+    Kraken caps reconnects at ~once/5 s after downtime (feeds.md §2) so ``base`` defaults to
+    that floor; override per venue as needed.
+    """
+
+    base_s: float = 1.0
+    factor: float = 2.0
+    max_s: float = 60.0
+    jitter: float = 0.5  # fractional full-jitter amplitude
+    rng: random.Random = field(default_factory=random.Random)
+
+    def delay(self, attempt: int) -> float:
+        raw = min(self.max_s, self.base_s * (self.factor ** max(0, attempt)))
+        # Full jitter in [raw*(1-jitter), raw*(1+jitter)], clamped to [0, max].
+        lo, hi = raw * (1.0 - self.jitter), raw * (1.0 + self.jitter)
+        return max(0.0, min(self.max_s, self.rng.uniform(lo, hi)))
+
+
+# --------------------------------------------------------------------------------------
+# Order books.
+# --------------------------------------------------------------------------------------
+class PriceLevelBook:
+    """Aggregated price→size book (Binance/Bybit diff-depth style)."""
+
+    def __init__(self) -> None:
+        self.bids: dict[Decimal, Decimal] = {}
+        self.asks: dict[Decimal, Decimal] = {}
+
+    def _side(self, side: str) -> dict[Decimal, Decimal]:
+        return self.bids if side == BID else self.asks
+
+    def set(self, side: str, price: Any, qty: Any) -> None:
+        """Absolute set: qty 0 removes the level (Binance step 8 / Bybit amount 0)."""
+        d = self._side(side)
+        p, q = _dec(price), _dec(qty)
+        if q == 0:
+            d.pop(p, None)
+        else:
+            d[p] = q
+
+    def clear(self) -> None:
+        self.bids.clear()
+        self.asks.clear()
+
+    def best_bid(self) -> Decimal | None:
+        return max(self.bids) if self.bids else None
+
+    def best_ask(self) -> Decimal | None:
+        return min(self.asks) if self.asks else None
+
+    def levels(self, side: str, n: int | None = None) -> list[tuple[Decimal, Decimal]]:
+        d = self._side(side)
+        rev = side == BID  # bids high→low, asks low→high
+        out = sorted(d.items(), key=lambda kv: kv[0], reverse=rev)
+        return out[:n] if n is not None else out
+
+
+@dataclass
+class Order:
+    side: str
+    price: Decimal
+    qty: Decimal
+    price_str: str  # exact transmitted string (needed for Kraken CRC32)
+    qty_str: str
+
+
+class OrderIdBook:
+    """Order-by-order book keyed by order id (Coinbase level3 / Kraken level3 / Bitstamp).
+
+    Insertion order within a price level is preserved (an ``OrderedDict``), which Kraken's
+    CRC32 checksum relies on ("orders in queue order").
+    """
+
+    def __init__(self) -> None:
+        self.orders: OrderedDict[str, Order] = OrderedDict()
+
+    def add(self, order_id: str, side: str, price: Any, qty: Any) -> None:
+        ps, qs = str(price), str(qty)
+        self.orders[order_id] = Order(side, _dec(price), _dec(qty), ps, qs)
+
+    def modify(self, order_id: str, qty: Any | None = None, price: Any | None = None) -> bool:
+        o = self.orders.get(order_id)
+        if o is None:
+            return False  # modify for an order we don't hold — normal, ignore
+        if qty is not None:
+            o.qty, o.qty_str = _dec(qty), str(qty)
+        if price is not None:
+            o.price, o.price_str = _dec(price), str(price)
+        return True
+
+    def delete(self, order_id: str) -> bool:
+        return self.orders.pop(order_id, None) is not None
+
+    def clear(self) -> None:
+        self.orders.clear()
+
+    def side_orders(self, side: str) -> list[Order]:
+        return [o for o in self.orders.values() if o.side == side]
+
+    def grouped(self, side: str) -> "OrderedDict[Decimal, list[Order]]":
+        """price → orders (insertion order preserved within each price)."""
+        out: OrderedDict[Decimal, list[Order]] = OrderedDict()
+        for o in self.orders.values():
+            if o.side == side:
+                out.setdefault(o.price, []).append(o)
+        return out
+
+    def levels(self, side: str, n: int | None = None) -> list[tuple[Decimal, Decimal]]:
+        agg: dict[Decimal, Decimal] = {}
+        for o in self.side_orders(side):
+            agg[o.price] = agg.get(o.price, Decimal(0)) + o.qty
+        rev = side == BID
+        out = sorted(agg.items(), key=lambda kv: kv[0], reverse=rev)
+        return out[:n] if n is not None else out
+
+    def best_bid(self) -> Decimal | None:
+        lv = self.levels(BID, 1)
+        return lv[0][0] if lv else None
+
+    def best_ask(self) -> Decimal | None:
+        lv = self.levels(ASK, 1)
+        return lv[0][0] if lv else None
+
+
+# --------------------------------------------------------------------------------------
+# Kraken v2 level3 CRC32 checksum (feeds.md §2).
+# --------------------------------------------------------------------------------------
+def _crc_token(s: str) -> str:
+    """Remove the decimal point and strip leading zeros (feeds.md worked examples:
+    ``44939.5`` → ``449395``; ``4.52308393`` → ``452308393``)."""
+    t = s.replace(".", "").lstrip("0")
+    return t if t else "0"
+
+
+def kraken_crc32(book: OrderIdBook, top_levels: int = 10) -> int:
+    """CRC32 over the top-``top_levels`` price levels per side, asks then bids.
+
+    Asks are taken price-ascending, bids price-descending; within a level the orders are in
+    queue (insertion) order; each order contributes ``price`` then ``qty`` with the decimal
+    point removed and leading zeros stripped, using the venue's *transmitted* strings. Result
+    is cast to unsigned 32-bit. (feeds.md §2; worked-example result 1063832831 is not
+    reproducible here because feeds.md does not give that example's input orders — UNVERIFIED.)
+    """
+    parts: list[str] = []
+    for side, reverse in ((ASK, False), (BID, True)):
+        grouped = book.grouped(side)
+        prices = sorted(grouped.keys(), reverse=reverse)[:top_levels]
+        for price in prices:
+            for o in grouped[price]:
+                parts.append(_crc_token(o.price_str))
+                parts.append(_crc_token(o.qty_str))
+    payload = "".join(parts).encode("ascii")
+    return zlib.crc32(payload) & 0xFFFFFFFF
+
+
+# --------------------------------------------------------------------------------------
+# Pure message-processor base.
+# --------------------------------------------------------------------------------------
+class MessageProcessor(ABC):
+    """Base for a venue's pure, socket-free message processor.
+
+    Subclasses implement :meth:`process` (and usually :meth:`apply_snapshot`). They MUST call
+    :meth:`_emit_gap` whenever they detect divergence — that both records/logs the gap and
+    raises ``needs_resnapshot`` so the IO layer resyncs.
+    """
+
+    venue: str = "base"
+    # Book processors resync on a gap; trade/tape processors only LOG the gap (a trade tape has
+    # no book to rebuild and no REST snapshot, so flagging needs_resnapshot would be spurious).
+    resync_on_gap: bool = True
+
+    def __init__(self, product: str, channel: str, log: logging.Logger = logger) -> None:
+        self.product = product
+        self.channel = channel
+        self.log = log
+        self.gaps: list[GapDetected] = []
+        self.needs_resnapshot = False
+        self.synced = False
+
+    def _emit_gap(
+        self, reason: str, recv_ts_ns: int, expected: Any = None, got: Any = None
+    ) -> GapDetected:
+        gap = GapDetected(
+            venue=self.venue,
+            product=self.product,
+            channel=self.channel,
+            reason=reason,
+            recv_ts_ns=recv_ts_ns,
+            expected=expected,
+            got=got,
+        )
+        self.gaps.append(gap)
+        log_gap(gap, self.log)
+        if self.resync_on_gap:
+            self.needs_resnapshot = True
+        return gap
+
+    def clear_resnapshot(self) -> None:
+        self.needs_resnapshot = False
+
+    @abstractmethod
+    def process(self, raw: Any, recv_ts_ns: int) -> list[dict]:
+        """Process one raw inbound message; return normalized events (may be empty)."""
+
+    def apply_snapshot(self, snapshot: Any, recv_ts_ns: int | None = None) -> None:  # noqa: D401
+        """Rebuild state from a freshly fetched snapshot. Default: no-op."""
+        raise NotImplementedError
+
+
+# --------------------------------------------------------------------------------------
+# IO driver (integration-level; not unit-tested — the processors are the tested core).
+# --------------------------------------------------------------------------------------
+@dataclass
+class IoConfig:
+    """Everything the generic driver needs from a venue adapter."""
+
+    venue: str
+    channel: str
+    urls: list[str]  # tried in order with fallback
+    subscribe_messages: list[dict]
+    ping_message: str | None = None
+    ping_interval_s: float | None = None
+    open_timeout_s: float = 10.0
+
+
+async def run_recorder(  # pragma: no cover - requires a live socket
+    config: IoConfig,
+    processors: MessageProcessor | list[MessageProcessor],
+    writer: Any,
+    resnapshot,
+    *,
+    backoff: BackoffPolicy | None = None,
+    stop_event=None,
+) -> None:
+    """Connect→subscribe→persist→process loop with auto-reconnect and resnapshot.
+
+    ``processors`` may be a single processor or a LIST sharing one connection (e.g. Binance
+    diff-depth + aggTrade, or Bybit orderbook + publicTrade on one combined-stream socket).
+    Every raw payload is written once (untouched) then routed to EVERY processor; each ignores
+    frames it doesn't handle. Only a processor with ``resync_on_gap`` that raises
+    ``needs_resnapshot`` triggers ``resnapshot(processor)`` — trade/tape processors only log.
+
+    ``writer`` is a ``RotatingZstdWriter``. ``resnapshot`` is an async callable
+    ``resnapshot(processor) -> None`` that fetches a fresh snapshot (REST or in-band) and
+    applies it. ``stop_event`` is an ``asyncio.Event`` for graceful shutdown; on exit the
+    caller must ``writer.close()`` to flush the final zstd frame.
+
+    Not exercised by unit tests (needs a live venue); the gap→resnapshot *decision* it relies
+    on lives entirely in the pure processors, which ARE tested.
+    """
+    import asyncio
+    import json
+
+    import websockets
+
+    procs = list(_ensure_iterable(processors))
+    backoff = backoff or BackoffPolicy()
+    attempt = 0
+    while stop_event is None or not stop_event.is_set():
+        url = config.urls[attempt % len(config.urls)]
+        try:
+            async with websockets.connect(url, open_timeout=config.open_timeout_s) as ws:
+                for msg in config.subscribe_messages:
+                    await ws.send(json.dumps(msg))
+                attempt = 0  # connected cleanly; reset backoff
+
+                async def _heartbeat() -> None:
+                    if not (config.ping_message and config.ping_interval_s):
+                        return
+                    while True:
+                        await asyncio.sleep(config.ping_interval_s)
+                        await ws.send(config.ping_message)
+
+                hb = asyncio.create_task(_heartbeat())
+                # Fresh snapshot on (re)connect so every book processor starts valid.
+                for p in procs:
+                    if p.resync_on_gap:
+                        await resnapshot(p)
+                try:
+                    async for raw in ws:
+                        recv = now_ns()  # stamp BEFORE parsing (CLAUDE.md convention)
+                        writer.write(raw, recv_ts_ns=recv)  # write once, untouched
+                        for p in procs:
+                            p.process(raw, recv)
+                            if p.needs_resnapshot:
+                                p.clear_resnapshot()
+                                await resnapshot(p)
+                        if stop_event is not None and stop_event.is_set():
+                            break
+                finally:
+                    hb.cancel()
+        except Exception as exc:  # noqa: BLE001 - reconnect on any socket/protocol error
+            attempt += 1
+            delay = backoff.delay(attempt)
+            logger.warning(
+                "recorder %s/%s disconnected (%s); reconnect in %.2fs",
+                config.venue,
+                config.channel,
+                exc,
+                delay,
+                extra={"event": "reconnect", "venue": config.venue, "delay_s": delay},
+            )
+            await asyncio.sleep(delay)
+
+
+def normalize_side(raw_side: Any) -> str:
+    """Map a venue's side token to the internal BID/ASK labels."""
+    s = str(raw_side).lower()
+    if s in {"buy", "bid", "bids", "b", "0", "yes"}:
+        return BID
+    if s in {"sell", "ask", "asks", "a", "1", "no"}:
+        return ASK
+    raise ValueError(f"unknown side token: {raw_side!r}")
+
+
+def as_dict(raw: Any) -> Any:
+    """Parse JSON str/bytes to a Python object; pass dicts/lists through."""
+    import json
+
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8")
+    if isinstance(raw, str):
+        return json.loads(raw)
+    return raw
+
+
+def _ensure_iterable(x: Any) -> Iterable:  # small helper reused by adapters
+    return x if isinstance(x, (list, tuple)) else [x]

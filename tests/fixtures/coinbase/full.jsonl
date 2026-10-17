@@ -1,0 +1,7 @@
+{"type":"subscriptions","channels":[{"name":"full","product_ids":["BTC-USD"]}]}
+{"type":"open","product_id":"BTC-USD","sequence":101,"order_id":"o1","side":"buy","price":"27000.00","remaining_size":"0.50"}
+{"type":"open","product_id":"BTC-USD","sequence":102,"order_id":"o2","side":"sell","price":"27010.00","remaining_size":"1.00"}
+{"type":"change","product_id":"BTC-USD","sequence":103,"order_id":"o1","new_size":"0.25"}
+{"type":"match","product_id":"BTC-USD","sequence":104,"maker_order_id":"o2","price":"27010.00","size":"0.40"}
+{"type":"open","product_id":"BTC-USD","sequence":106,"order_id":"o3","side":"buy","price":"26990.00","remaining_size":"2.00"}
+{"type":"done","product_id":"BTC-USD","sequence":107,"order_id":"o1","reason":"canceled"}

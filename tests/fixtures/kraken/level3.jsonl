@@ -1,0 +1,3 @@
+{"channel":"level3","type":"snapshot","data":[{"symbol":"BTC/USD","checksum":843596241,"bids":[{"order_id":"b1","limit_price":"99.5","order_qty":"1.5"},{"order_id":"b2","limit_price":"99.0","order_qty":"3.0"}],"asks":[{"order_id":"a1","limit_price":"100.5","order_qty":"1.0"},{"order_id":"a2","limit_price":"101.0","order_qty":"2.0"}]}]}
+{"channel":"level3","type":"update","data":[{"symbol":"BTC/USD","checksum":1502863869,"bids":[{"event":"add","order_id":"b3","limit_price":"99.8","order_qty":"0.5"},{"event":"delete","order_id":"b2","limit_price":"99.0","order_qty":"3.0"}],"asks":[]}]}
+{"channel":"level3","type":"update","data":[{"symbol":"BTC/USD","checksum":999999999,"bids":[{"event":"modify","order_id":"b1","limit_price":"99.5","order_qty":"0.1"}],"asks":[]}]}
