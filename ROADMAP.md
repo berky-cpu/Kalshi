@@ -178,6 +178,13 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   snapshot-on-resubscribe spec must be confirmed against a **live capture from the US box** before Coinbase
   is counted (CLAUDE.md rule 4). Deploy to Ashburn → capture → replay closes it. *Until then the index runs
   on 2 verified (Bitstamp + Kraken) + 1 provisional (Coinbase).* Owner: data-engineer.
+  *Live-only bug found + fixed on first deploy 2026-10-17:* the level2 opening snapshot is one ~1.6 MiB /
+  ~40k-level frame that exceeded the websockets default 1 MiB `max_size` → frame rejected → silent
+  reconnect-loop, nothing recorded. Added `IoConfig.max_size` (default 2²⁰, byte-identical for all existing
+  feeds) and set Coinbase Advanced to `None` (unbounded). Review
+  [REV-016](notes/reviews/REV-016-ws-max-size.md) (PASS). A wire probe from the box incidentally **confirmed
+  F1's premise** (seq +1 across l2_data + subscriptions, in-stream snapshot at seq 0) — so the pending live
+  capture will close F1. **254 tests pass.**
 
 - [x] **1.1c Persist REST snapshots into recordings (recorder completeness).** The recorder applies REST
   order-book snapshots (initial sync + resync) in memory but wrote only inbound WS frames, so

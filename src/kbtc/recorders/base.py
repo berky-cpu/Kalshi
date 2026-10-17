@@ -468,6 +468,13 @@ class IoConfig:
     open_timeout_s: float = 10.0
     header_factory: Any = None  # Callable[[], dict] | None — fresh handshake headers per connect
     subscribe_factory: Any = None  # Callable[[], list[dict]] | None — fresh subscribe per connect
+    # Max inbound WS frame size (bytes) passed straight to ``websockets.connect(max_size=...)``.
+    # Default 2**20 (1 MiB) PRESERVES the websockets library default, so every existing feed's
+    # effective limit is unchanged. A venue whose snapshot legitimately exceeds 1 MiB (Coinbase
+    # Advanced Trade's ~40k-level L2 snapshot is one ~1.6 MiB frame) sets this to ``None``
+    # (unbounded) so the complete baseline frame is received instead of silently rejected →
+    # reconnect-loop. These are trusted exchange feeds, so unbounded is safe where needed.
+    max_size: int | None = 2 ** 20
 
 
 async def run_recorder(  # pragma: no cover - requires a live socket
@@ -516,7 +523,8 @@ async def run_recorder(  # pragma: no cover - requires a live socket
             # before connect and never logged.
             headers = config.header_factory() if config.header_factory else None
             async with websockets.connect(
-                url, open_timeout=config.open_timeout_s, additional_headers=headers
+                url, open_timeout=config.open_timeout_s, additional_headers=headers,
+                max_size=config.max_size,
             ) as ws:
                 # Fresh subscribe per connect when a short-lived token is embedded (Kraken);
                 # otherwise the static list. Never logged.

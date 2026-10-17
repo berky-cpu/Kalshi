@@ -12,10 +12,19 @@ from decimal import Decimal
 from conftest import load_fixture
 
 from kbtc.recorders.base import ASK, BID
-from kbtc.recorders.coinbase_advanced import CoinbaseAdvancedProcessor
+from kbtc.recorders.coinbase_advanced import CoinbaseAdvancedProcessor, io_config
 from kbtc.normalize import pipeline
 
 T0 = 1_760_000_000_000_000_000
+
+
+def test_io_config_unbounded_max_size_for_large_snapshot():
+    """The level2 snapshot is one ~1.6 MiB frame (~40k levels) > the websockets 1 MiB default, so
+    the feed MUST set max_size=None (unbounded) or the baseline frame is silently rejected."""
+    cfg = io_config(product="BTC-USD")
+    assert cfg.max_size is None
+    assert cfg.urls == ["wss://advanced-trade-ws.coinbase.com"]
+    assert cfg.venue == "coinbase_advanced" and cfg.channel == "level2"
 
 
 def test_snapshot_updates_removal_gap_and_resync():
