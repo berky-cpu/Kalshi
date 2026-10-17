@@ -36,9 +36,7 @@ sudo chown -R kbtc:kbtc /opt/kbtc
 curl -LsSf https://astral.sh/uv/install.sh | sudo sh
 sudo -u kbtc git clone <repo-url> /opt/kbtc
 cd /opt/kbtc
-sudo -u kbtc uv sync            # creates /opt/kbtc/.venv from uv.lock
-# Kalshi handshake auth needs 'cryptography' (not a core dep — only this box signs):
-sudo -u kbtc uv add cryptography
+sudo -u kbtc uv sync            # creates /opt/kbtc/.venv from uv.lock (incl. cryptography for Kalshi auth)
 ```
 
 Smoke-test a feed build without connecting (no secrets needed to parse args):
