@@ -138,6 +138,16 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   root-only vs kbtc-run backup → `640 root:kbtc`; Ashburn: 2 stale partial files tripped `--immutable` →
   deleted + re-backed-up); both systemd backups now succeed, verified. `deploy/status.sh` (→
   `/usr/local/bin/kbtc-status`) is the live data-collection dashboard.
+  *Incident 2026-10-18 (caught via the dashboard ~11h in):* `unattended-upgrades` restarted all recorders
+  at 06:34; spot+perps recovered, but (1) Kraken's level3 token-subscribe silently failed → heartbeats-only,
+  11h no data (recovered on restart; **self-heal + alerting pending**), and (2) Kalshi both missed the live
+  market — discovery trusted the `status=open` server filter but the tradeable market is `status=active`
+  (REV-019 residual, realized) — and leaked to 2.3 GB/11h. **Fixes:** live discovery is now client-side
+  (`_is_live`: active/open live, time-window fallback; no `status=open` filter); memory bounded O(1)
+  (`trades`/`lifecycle` → capped deques, per-market `books` evicted on removal/settle, `_seq_by_sid` cleared
+  on reconnect). Review [REV-020](notes/reviews/REV-020-kalshi-incident-active-discovery-memleak.md) (PASS).
+  **300 tests.** Follow-ups in-flight: recorder self-heal (detect no-data-despite-heartbeats → reconnect),
+  failure alerting, and taming unattended-upgrades.
   *EU perp box added 2026-10-17* — a Hetzner CX22 (EU, x86_64) because Binance (HTTP 451) and Bybit
   (HTTP 403) **geo-block the US Ashburn IP** (verified). **Live & recording 24/7:** `binance-perp`
   (depthUpdate + persisted REST snapshot → complete books) and `bybit-perp` (orderbook.50 snapshot+delta),
