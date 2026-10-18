@@ -155,9 +155,13 @@ a process restart.
 - **Kalshi dynamic ticker capture (ROADMAP 1.3):** set `KBTC_KALSHI_SERIES=KXBTC15M` for 24/7
   capture — the recorder discovers open markets (public REST) and tracks the 15-min roll via
   `update_subscription` add/delete on ONE connection (VERIFIED on the wire 2026-10-17; see
-  docs/feeds.md). `KBTC_KALSHI_TICKERS` (static, no poller) still exists for a one-off window and
-  takes precedence if both are set. Gap **resync** remains a fail-safe no-op pending ROADMAP 1.1b
-  sid-pruning (raw is always persisted). Tune `KBTC_KALSHI_POLL_S` / `KBTC_KALSHI_CHANNELS` if needed.
+  docs/feeds.md). It **pre-subscribes the upcoming window(s) before they open** (`KBTC_KALSHI_LOOKAHEAD`,
+  default 1), so the new market's strike-forming open-window is captured with ZERO gap at the roll —
+  the poll interval (`KBTC_KALSHI_POLL_S`) no longer bounds roll coverage. A closed market is kept for
+  `KBTC_KALSHI_REMOVE_GRACE_S` (default 120 s) so its final frames survive before it is dropped.
+  `KBTC_KALSHI_TICKERS` (static, no poller) still exists for a one-off window and takes precedence if
+  both are set. Gap **resync** remains a fail-safe no-op pending ROADMAP 1.1b sid-pruning (raw is
+  always persisted). Tune `KBTC_KALSHI_CHANNELS` if needed.
   WS error frames (code 26 = per-sub market limit, 27 = rate limit) now LOG a WARNING
   (`event=kalshi_ws_error`) instead of being silently dropped. **Known fast-follow** (improbable at
   KXBTC15M's ~1-2 open markets, now observable via that WARNING): the poller advances its applied
