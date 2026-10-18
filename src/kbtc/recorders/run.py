@@ -55,6 +55,15 @@ from .writer import RotatingZstdWriter
 
 DEFAULT_ROOT = "data/raw"
 
+# Data-staleness watchdog timeout for Kalshi (seconds). Higher than the 120 s crypto default: a
+# KXBTC15M book can legitimately go quiet for a stretch (a near-decided binary, a pre-subscribed
+# upcoming window that is empty until it opens), whereas the continuous crypto books update many
+# times/second. 300 s is comfortably above any plausible healthy quiet spell yet still self-heals a
+# true "connected but silent" stall (the 2026-10-18 incident ran ~11 h) within minutes. The watchdog
+# tracks the MAX data recency across all subscribed markets, so the actively-trading live market
+# keeps it fresh even while a pre-subscribed window is silent.
+KALSHI_STALE_TIMEOUT_S = 300.0
+
 TokenFetch = Callable[[Mapping[str, str]], str]
 Signer = Callable[[bytes], bytes]
 SignerFactory = Callable[[Mapping[str, str]], Signer]
@@ -302,6 +311,7 @@ def _build_kalshi(name: str, env: Mapping[str, str], root: str, *,
             channels=channels, remove_grace_s=grace_s)
 
         cfg = kalshi.io_config(tickers=None)
+        cfg.stale_timeout_s = KALSHI_STALE_TIMEOUT_S
         # Per-connect: discover the TARGET set (open + imminent-upcoming so the next window is
         # pre-subscribed with no roll gap), seed the manager, and build the subscribe. The blocking
         # REST call happens at connect (like Kraken's token fetch), never at build.
@@ -334,6 +344,7 @@ def _build_kalshi(name: str, env: Mapping[str, str], root: str, *,
 
     # STATIC / LEGACY MODE — one subscribe (orderbook_delta + trade + lifecycle), no poller.
     cfg = kalshi.io_config(tickers=tickers)
+    cfg.stale_timeout_s = KALSHI_STALE_TIMEOUT_S
     cfg.subscribe_messages = kalshi.subscribe_messages(
         tickers, channels=("orderbook_delta", "trade", "market_lifecycle_v2")
     )
