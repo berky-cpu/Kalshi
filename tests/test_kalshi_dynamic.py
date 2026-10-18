@@ -7,6 +7,7 @@ a FAKE fetcher). The live poller (``run_poller``) needs a socket and is validate
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 import pytest
 
@@ -21,6 +22,10 @@ from kbtc.recorders.kalshi_dynamic import (
 T0 = "KXBTC15M-26OCT161500-B50000"
 T1 = "KXBTC15M-26OCT161515-B50000"
 T2 = "KXBTC15M-26OCT161530-B50000"
+
+
+def iso_epoch(s: str) -> float:
+    return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
 
 
 # --------------------------------------------------------------------------------------
@@ -281,12 +286,52 @@ def test_ids_strictly_increment_across_builds():
 
 
 # --------------------------------------------------------------------------------------
-# Open-market discovery (public REST) with an injected fetcher — no network.
+# Market discovery (public REST) with an injected fetcher — no network.
+# FIX 1: live markets are classified CLIENT-SIDE (status==active/open), never via the broken
+# ``status=open`` server filter. The fake fetch returns the whole close-ts window (as the real API
+# does) and the code classifies.
 # --------------------------------------------------------------------------------------
-def test_discover_open_tickers_paginates_via_cursor():
+def _all_markets_fetch(rows, calls=None):
+    def fetch(url: str) -> dict:
+        if calls is not None:
+            calls.append(url)
+        return {"markets": rows, "cursor": ""}
+    return fetch
+
+
+def test_discover_live_includes_active_excludes_finalized_and_initialized():
+    # The key FIX-1 case: the tradeable market is status=active (NOT open).
+    rows = [
+        {"ticker": T0, "status": "active"},        # live
+        {"ticker": "OPENY", "status": "open"},     # live (if it ever appears)
+        {"ticker": T1, "status": "initialized"},   # upcoming, not live
+        {"ticker": "DONE", "status": "finalized"}, # settled, not live
+    ]
+    calls: list[str] = []
+    live = discover_open_tickers(
+        _all_markets_fetch(rows, calls), series="KXBTC15M", base="https://x/v2", now_s=1000.0)
+    assert live == [T0, "OPENY"]
+    # Must NOT rely on the status=open server filter; queries a close-ts window instead.
+    assert "status=open" not in calls[0]
+    assert "series_ticker=KXBTC15M" in calls[0] and "min_close_ts=" in calls[0]
+
+
+def test_discover_live_unknown_status_uses_time_window():
+    rows = [
+        {"ticker": "NOWLIVE", "status": "weird", "open_time": "2026-10-18T03:00:00Z",
+         "close_time": "2026-10-18T03:15:00Z"},     # open<=now<close → live
+        {"ticker": "FUTURE", "status": "weird", "open_time": "2026-10-18T09:00:00Z",
+         "close_time": "2026-10-18T09:15:00Z"},     # now<open → not live
+    ]
+    now_s = iso_epoch("2026-10-18T03:07:00Z")
+    live = discover_open_tickers(_all_markets_fetch(rows), base="https://x/v2", now_s=now_s)
+    assert live == ["NOWLIVE"]
+
+
+def test_discover_live_paginates_via_cursor():
     pages = {
-        "page1": {"markets": [{"ticker": T0}, {"ticker": T1}], "cursor": "CUR2"},
-        "page2": {"markets": [{"ticker": T2}], "cursor": ""},
+        "page1": {"markets": [{"ticker": T0, "status": "active"}], "cursor": "CUR2"},
+        "page2": {"markets": [{"ticker": T1, "status": "active"}], "cursor": ""},
     }
     calls: list[str] = []
 
@@ -294,36 +339,21 @@ def test_discover_open_tickers_paginates_via_cursor():
         calls.append(url)
         return pages["page2"] if "cursor=CUR2" in url else pages["page1"]
 
-    tickers = discover_open_tickers(fake_fetch, series="KXBTC15M", base="https://x/v2")
-    assert tickers == [T0, T1, T2]
-    # The query filtered to the open series, and followed the cursor to page 2.
-    assert "series_ticker=KXBTC15M" in calls[0] and "status=open" in calls[0]
+    assert discover_open_tickers(fake_fetch, base="https://x/v2", now_s=1000.0) == [T0, T1]
     assert any("cursor=CUR2" in u for u in calls)
 
 
-def test_discover_open_tickers_empty():
-    def fake_fetch(url: str) -> dict:
-        return {"markets": [], "cursor": ""}
-
-    assert discover_open_tickers(fake_fetch, base="https://x/v2") == []
-
-
-# A fetcher that routes by the status filter / close-ts window in the URL.
-def _market_fetch(open_rows, upcoming_rows):
-    def fetch(url: str) -> dict:
-        if "status=open" in url:
-            return {"markets": open_rows, "cursor": ""}
-        return {"markets": upcoming_rows, "cursor": ""}  # the min/max close-ts query
-    return fetch
+def test_discover_live_empty():
+    assert discover_open_tickers(_all_markets_fetch([]), base="https://x/v2", now_s=1000.0) == []
 
 
 def test_discover_upcoming_picks_next_initialized_capped():
-    upcoming_rows = [
+    rows = [
         {"ticker": T1, "status": "initialized", "close_time": "2026-10-18T03:15:00Z"},
         {"ticker": T2, "status": "initialized", "close_time": "2026-10-18T03:30:00Z"},
         {"ticker": "ACTIVE", "status": "active", "close_time": "2026-10-18T03:00:00Z"},  # not upcoming
     ]
-    fetch = _market_fetch([], upcoming_rows)
+    fetch = _all_markets_fetch(rows)
     # cap 1 → only the earliest-closing initialized window.
     assert kalshi_dynamic.discover_upcoming_tickers(
         fetch, series="KXBTC15M", base="https://x/v2", now_s=0.0, max_upcoming=1) == [T1]
@@ -335,32 +365,101 @@ def test_discover_upcoming_picks_next_initialized_capped():
 def test_discover_upcoming_runaway_guard_hard_cap():
     rows = [{"ticker": f"K-{i}", "status": "initialized",
              "close_time": f"2026-10-18T0{i}:00:00Z"} for i in range(1, 6)]
-    fetch = _market_fetch([], rows)
+    fetch = _all_markets_fetch(rows)
     # Even asking for 99, never more than the hard cap (2).
     out = kalshi_dynamic.discover_upcoming_tickers(
         fetch, base="https://x/v2", now_s=0.0, max_upcoming=99)
     assert len(out) == 2
 
 
-def test_discover_target_is_open_plus_upcoming():
-    open_rows = [{"ticker": T0}]
-    upcoming_rows = [{"ticker": T1, "status": "initialized",
-                      "close_time": "2026-10-18T03:15:00Z"}]
-    fetch = _market_fetch(open_rows, upcoming_rows)
+def test_discover_target_is_live_plus_upcoming():
+    # Mixed statuses in one window: the ACTIVE market + the next INITIALIZED window, finalized out.
+    rows = [
+        {"ticker": T0, "status": "active"},
+        {"ticker": T1, "status": "initialized", "close_time": "2026-10-18T03:15:00Z"},
+        {"ticker": "DONE", "status": "finalized", "close_time": "2026-10-18T02:45:00Z"},
+    ]
     target = kalshi_dynamic.discover_target_tickers(
-        fetch, series="KXBTC15M", base="https://x/v2", now_s=0.0, max_upcoming=1)
-    assert target == [T0, T1]  # open first, then the pre-subscribed upcoming window
+        _all_markets_fetch(rows), series="KXBTC15M", base="https://x/v2",
+        now_s=1000.0, max_upcoming=1)
+    assert target == [T0, T1]  # live first, then the pre-subscribed upcoming window
 
 
-def test_discover_target_dedupes_open_and_upcoming():
-    # If a market somehow appears in both lists, it's included once.
-    open_rows = [{"ticker": T0}]
-    upcoming_rows = [{"ticker": T0, "status": "initialized", "close_time": "z"},
-                     {"ticker": T1, "status": "initialized", "close_time": "zz"}]
-    fetch = _market_fetch(open_rows, upcoming_rows)
+def test_discover_target_dedupes_live_and_upcoming():
+    # A market classified both live and (defensively) upcoming is included once.
+    rows = [
+        {"ticker": T0, "status": "active"},
+        {"ticker": T0, "status": "initialized", "close_time": "2026-10-18T03:15:00Z"},
+        {"ticker": T1, "status": "initialized", "close_time": "2026-10-18T03:30:00Z"},
+    ]
     target = kalshi_dynamic.discover_target_tickers(
-        fetch, base="https://x/v2", now_s=0.0, max_upcoming=2)
+        _all_markets_fetch(rows), base="https://x/v2", now_s=1000.0, max_upcoming=2)
     assert target == [T0, T1]
+
+
+# --------------------------------------------------------------------------------------
+# FIX 2 — bounded memory across many rolls (the 11h / 2.3 GB leak).
+# --------------------------------------------------------------------------------------
+def _snapshot(ticker, sid, seq=1):
+    return {"type": "orderbook_snapshot", "sid": sid, "seq": seq, "market_ticker": ticker,
+            "yes_dollars_fp": [["0.40", "100.00"]], "no_dollars_fp": [["0.58", "120.00"]]}
+
+
+def test_books_dict_bounded_across_many_rolls():
+    # Simulate N market rolls: each new market gets a snapshot (book created), then is evicted when
+    # it rolls off (as the poller does after grace). The tracked-book count must stay O(1), not O(N).
+    p = KalshiProcessor()
+    live = None
+    for i in range(500):
+        tk = f"KXBTC15M-ROLL-{i}"
+        p.process(_snapshot(tk, sid=1), i)       # new market book appears
+        if live is not None:
+            p.evict_market(live)                 # previous market rolled off → evicted
+        live = tk
+        assert len(p.books) == 1                 # only the current market is tracked
+    assert len(p.books) == 1
+
+
+def test_evict_market_is_idempotent_and_targeted():
+    p = KalshiProcessor()
+    p.process(_snapshot("A", sid=1), 1)
+    p.process(_snapshot("B", sid=1, seq=2), 2)
+    assert set(p.books) == {"A", "B"}
+    p.evict_market("A")
+    p.evict_market("A")  # idempotent
+    p.evict_market("NOPE")  # unknown → no-op
+    assert set(p.books) == {"B"}
+
+
+def test_settled_lifecycle_frame_evicts_book():
+    p = KalshiProcessor()
+    p.process(_snapshot("A", sid=1), 1)
+    assert "A" in p.books
+    p.process({"type": "market_lifecycle_v2", "sid": 9, "market_ticker": "A",
+               "status": "finalized"}, 2)
+    assert "A" not in p.books  # settled → book freed immediately
+    # A non-terminal lifecycle status does NOT evict.
+    p.process(_snapshot("B", sid=1, seq=2), 3)
+    p.process({"type": "market_lifecycle_v2", "sid": 9, "market_ticker": "B",
+               "status": "active"}, 4)
+    assert "B" in p.books
+
+
+def test_trades_and_lifecycle_tails_are_bounded():
+    # The live introspection tails must not grow without bound (the authoritative copy is the raw
+    # written by writer.py). Push far more than the cap and assert the deque is capped.
+    p = KalshiProcessor()
+    n = p.TRADES_MAXLEN + 5000
+    for i in range(n):
+        p.process({"type": "trade", "sid": 9, "seq": i + 1,
+                   "msg": {"trade_id": str(i), "count_fp": "1.00"}}, i)
+    assert len(p.trades) == p.TRADES_MAXLEN       # bounded, not n
+    assert p.trades[-1]["trade_id"] == str(n - 1)  # keeps the most recent tail
+
+    for i in range(p.LIFECYCLE_MAXLEN + 2000):
+        p.process({"type": "market_lifecycle_v2", "sid": 9,
+                   "market_ticker": f"K{i}", "status": "active"}, i)
+    assert len(p.lifecycle) == p.LIFECYCLE_MAXLEN
 
 
 # --------------------------------------------------------------------------------------

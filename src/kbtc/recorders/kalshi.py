@@ -47,6 +47,7 @@ Prices are DOLLAR strings and sizes fixed-point count strings, both parsed to ex
 from __future__ import annotations
 
 import os
+from collections import deque
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -59,6 +60,9 @@ ENDPOINT_DEMO = "wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2"  # VERIFI
 WS_SIGN_PATH = "/trade-api/ws/v2"  # path signed for the handshake (VERIFIED)
 
 _LIFECYCLE = {"market_lifecycle", "market_lifecycle_v2", "market_lifecycle_update"}
+# Terminal lifecycle statuses → evict the market's book (FIX 2). Conservative set: only
+# unambiguously-settled states.
+_SETTLED_LIFECYCLE_STATUSES = frozenset({"finalized", "settled", "closed", "determined"})
 # Snapshot side arrays → internal book side label (VERIFIED field names).
 _SNAPSHOT_SIDES = (("yes_dollars_fp", "yes"), ("no_dollars_fp", "no"))
 
@@ -85,15 +89,27 @@ def _dec(x: Any) -> Decimal:
 class KalshiProcessor(MessageProcessor):
     venue = "kalshi"
 
+    # Memory bound (FIX 2, 11h-outage incident 2026-10-18): ``trades``/``lifecycle`` are live
+    # introspection/debug tails only — the AUTHORITATIVE copy of every frame is the untouched raw
+    # written by ``writer.py``, and offline ``normalize`` reads from those files, never from these.
+    # In a long 24/7 run an unbounded ``list.append`` per message grew to GBs (the process peaked at
+    # 2.3 GB → SIGKILL). Bounded ``deque``s keep only a recent tail; tests still index ``[0]`` and
+    # read ``len`` normally.
+    TRADES_MAXLEN = 4096
+    LIFECYCLE_MAXLEN = 1024
+
     def __init__(self, product: str = "KXBTC15M", channel: str = "orderbook_delta",
                  **kw: Any) -> None:
         super().__init__(product=product, channel=channel, **kw)
         # Book per market_ticker: {side_label: {price: size}}. Side labels are whatever the feed
-        # uses — yes/no (event markets, VERIFIED) or bid/ask (perps, VERIFIED).
+        # uses — yes/no (event markets, VERIFIED) or bid/ask (perps, VERIFIED). A market's book is
+        # EVICTED (``evict_market``) when the dynamic manager drops it (delete_markets / grace) or
+        # when a lifecycle frame reports it settled, so ``books`` stays bounded to live + upcoming +
+        # recently-closed markets rather than growing by ~45 markets/11h forever (FIX 2).
         self.books: dict[str, dict[str, dict[Any, Any]]] = {}
         self._seq_by_sid: dict[int, int] = {}
-        self.trades: list[dict] = []
-        self.lifecycle: list[dict] = []
+        self.trades: deque[dict] = deque(maxlen=self.TRADES_MAXLEN)
+        self.lifecycle: deque[dict] = deque(maxlen=self.LIFECYCLE_MAXLEN)
         # Dynamic-subscription support (ROADMAP 1.3): capture the server-assigned subscription id
         # per channel from the ``subscribed`` ack so the dynamic manager can target
         # ``update_subscription`` at the right ``sid`` without a reconnect. VERIFIED on the wire
@@ -102,6 +118,15 @@ class KalshiProcessor(MessageProcessor):
 
     def book_for(self, ticker: str) -> dict[str, dict[Any, Any]]:
         return self.books.setdefault(ticker, {})
+
+    def evict_market(self, ticker: str) -> None:
+        """Drop all per-market state for ``ticker`` (FIX 2: bounded memory across many rolls).
+
+        Called by the dynamic poller when a market is removed from the subscription (after its
+        grace window) and on a settled lifecycle frame. Idempotent — evicting an unknown ticker is a
+        no-op. ``_seq_by_sid`` is keyed by SID (shared across markets on one subscription), so it is
+        NOT touched here; it is re-anchored by each snapshot and bounded by the channel count."""
+        self.books.pop(ticker, None)
 
     def known_sids(self) -> list[int]:
         """Subscription ids currently tracked — used to unsubscribe the old subscription before a
@@ -175,6 +200,13 @@ class KalshiProcessor(MessageProcessor):
 
         if typ in _LIFECYCLE:
             self.lifecycle.append(body)
+            # FIX 2: evict a market's book as soon as it settles, so finalized markets don't pile up
+            # in ``books`` for hours (the grace-removal path also evicts, this is the earlier of the
+            # two triggers). Status key/taxonomy may vary; only a clearly-terminal status evicts.
+            status = body.get("status")
+            ticker = body.get("market_ticker")
+            if ticker and isinstance(status, str) and status in _SETTLED_LIFECYCLE_STATUSES:
+                self.evict_market(ticker)
             return [{"kind": "lifecycle", **body}]
 
         if typ == "subscribed":
@@ -209,6 +241,9 @@ class KalshiProcessor(MessageProcessor):
         ``DynamicSubscriptionManager.ready()`` correctly waits for the FRESH ``subscribed`` acks
         before any ``update_subscription`` is sent (ROADMAP 1.3 F2)."""
         self.sid_by_channel.clear()
+        # FIX 2: a reconnect gets brand-new server sids; drop the old per-sid seq anchors so this
+        # dict can't accumulate dead sids across many reconnects (each snapshot re-anchors anyway).
+        self._seq_by_sid.clear()
 
     def _log_error(self, body: dict, msg: dict) -> None:
         code = body.get("code", msg.get("code"))
