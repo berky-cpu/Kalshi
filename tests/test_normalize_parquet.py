@@ -141,7 +141,11 @@ def test_cli_end_to_end(tmp_path):
 
     kalshi_trades = pl.read_parquet(
         out / "trades" / "venue=kalshi" / "channel=market" / "date=2025-10-09" / "part.parquet")
-    assert kalshi_trades.height == 1 and kalshi_trades.row(0, named=True)["side"] == "yes"
+    assert kalshi_trades.height == 1
+    kt = kalshi_trades.row(0, named=True)
+    assert kt["side"] == "yes"                     # taker_side
+    assert kt["price"] == Decimal("0.4100")        # yes_price_dollars (dollars)
+    assert kt["size"] == Decimal("5.00")           # count_fp
 
     settlements = pl.read_parquet(out / "settlements" / "date=2025-10-09" / "part.parquet")
     assert settlements.height == 3

@@ -162,6 +162,9 @@ class KalshiProcessor(MessageProcessor):
         if typ == "trade":
             if not self._check_seq(sid, seq, recv_ts_ns):
                 return []
+            # Record the raw trade payload untouched (no field access → cannot crash on schema
+            # drift); the VERIFIED trade schema (trade_id/yes_price_dollars/no_price_dollars/
+            # count_fp/taker_side/..., live-captured 2026-10-17) is parsed in normalize.extract.
             self.trades.append(body)
             return [{"kind": "trade", **body}]
 

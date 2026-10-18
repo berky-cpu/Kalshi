@@ -1,6 +1,6 @@
 {"type":"orderbook_snapshot","sid":7,"seq":1,"market_ticker":"KXBTC15M-26OCT16","market_id":"a1b2c3d4-0000-4000-8000-000000000001","yes_dollars_fp":[["0.40","100.00"],["0.41","250.00"]],"no_dollars_fp":[["0.58","120.00"]]}
 {"type":"orderbook_delta","sid":7,"seq":2,"market_ticker":"KXBTC15M-26OCT16","market_id":"a1b2c3d4-0000-4000-8000-000000000001","price_dollars":"0.40","delta_fp":"50.00","side":"yes","ts_ms":1760000000100}
 {"type":"orderbook_delta","sid":7,"seq":3,"market_ticker":"KXBTC15M-26OCT16","market_id":"a1b2c3d4-0000-4000-8000-000000000001","price_dollars":"0.41","delta_fp":"-250.00","side":"yes","ts_ms":1760000000200}
-{"type":"trade","sid":9,"seq":1,"market_ticker":"KXBTC15M-26OCT16","yes_price":41,"count":5,"taker_side":"yes"}
+{"type":"trade","sid":9,"seq":1,"msg":{"trade_id":"d290f1ee-6c54-4b01-90e6-d701748f0851","market_ticker":"KXBTC15M-26OCT16","yes_price_dollars":"0.4100","no_price_dollars":"0.5900","count_fp":"5.00","taker_side":"yes","taker_outcome_side":"yes","taker_book_side":"bid","is_block_trade":false,"ts":1760000000,"ts_ms":1760000000500}}
 {"type":"orderbook_delta","sid":7,"seq":5,"market_ticker":"KXBTC15M-26OCT16","market_id":"a1b2c3d4-0000-4000-8000-000000000001","price_dollars":"0.58","delta_fp":"30.00","side":"no","ts_ms":1760000000500}
 {"type":"market_lifecycle_v2","sid":11,"market_ticker":"KXBTC15M-26OCT16","status":"active"}

@@ -42,7 +42,32 @@ Captured a real authed KXBTC15M orderbook (box, `KXBTC15M-26OCT172000-00`), whic
 (`ping_interval_s=None`, no `ping_message`). The 24/7 Kalshi book recorder must not be enabled until the
 Kalshi WS keepalive is added and the close reason is confirmed. Schema correctness is unaffected.
 
-## Status
-Schema VERIFIED (doc + live wire). Adapter parses real frames correctly. 1.1b NOT fully closed: the
-recorder isn't stably deployable until the keepalive fix; trade payload units and unsubscribe-`sids`
-envelope remain UNVERIFIED.
+## Status (Round 1 — superseded by Round 2 below)
+Schema VERIFIED (doc + live wire). Adapter parses real frames correctly. Round 1 flagged a "keepalive"
+reconnect blocker and an unverified trade payload — **both resolved in Round 2**: the reconnect was the
+old adapter's `KeyError` (not keepalive), and the trade schema is now live-verified. See Round 2.
+
+## Round 2 — trade schema + reconnect root cause + final 1.1b sign-off (2026-10-17)
+- **Reconnect mystery SOLVED (my earlier keepalive diagnosis was WRONG):** the ~4 s reconnect was the OLD
+  adapter raising `KeyError: 'price'` on every `orderbook_delta`; `run_recorder` catches ANY `process()`
+  exception as a disconnect and reconnects. With the verified-schema adapter deployed the connection is
+  STABLE — a live box run captured **10,113 frames in 22 s on a single connection, 0 processor crashes**
+  (`subscribed:3`), and a direct WS probe was stable 40 s / 27k frames with AND without ping. No keepalive
+  needed. The wrong "no-keepalive, drops every 4 s" note was removed from facts.md.
+- **Trade schema VERIFIED on the live wire** and the adapter/normalizer corrected: real trades are nested
+  under `msg` = `{trade_id, market_ticker, yes_price_dollars, no_price_dollars (dollar strings), count_fp
+  (fixed-point), taker_side (yes/no), taker_outcome_side, taker_book_side (bid/ask), is_block_trade, ts,
+  ts_ms}` — NOT the old `yes_price` cents-int guess. `_kalshi_trades` emits price=`yes_price_dollars`
+  (Decimal, YES convention), size=`count_fp`, side=`taker_side`, `exch_ts_ns` from `ts_ms`. Fixture's trade
+  frame replaced with the real nested schema (orderbook stays flat → both shapes exercised).
+- **Legacy-fallback hardened (red-team LOW, applied):** the silent `yes_price`/`count` fallback is removed;
+  a missing verified field now logs a WARNING (`kalshi_trade_schema_drift`) and skips the trade, so a future
+  Kalshi field rename surfaces loudly instead of silently mis-parsing a differently-scaled field.
+- **Red-team Round 2: PASS.** 1.1b SCHEMA acceptance MET — orderbook + trade both live-verified, adapter
+  parses real frames with 0 crashes, seq-reset-on-reconnect independently confirmed (snapshot re-anchors
+  `_seq_by_sid`), docs corrected and sourced, synthetic guesses replaced by live-captured truth. 257 tests.
+- **Carried to 1.3 (deploy phase), NOT 1.1b schema:** continuous 24/7 capture needs dynamic ticker
+  management (KXBTC15M rolls a new market every 15 min vs a static `KBTC_KALSHI_TICKERS`); the in-session
+  resubscribe-without-disconnect resync re-emitting a snapshot, and the unsubscribe-`sids` envelope, stay
+  INFERRED (the full reconnect→snapshot→re-anchor path IS verified). A real block trade
+  (`is_block_trade=true`) should be spot-checked once seen.
