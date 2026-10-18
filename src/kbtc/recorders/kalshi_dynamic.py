@@ -22,9 +22,12 @@ VERIFIED (docs.kalshi.com/websockets/websocket-connection, 2026-10-17):
   undocumented). The live poller handles an error frame gracefully (logs, retries next poll).
 * Max 5 concurrent WS connections per user — one dynamic session stays well under it.
 
-Open-market discovery (PUBLIC REST, no auth):
-``GET api.elections.kalshi.com/trade-api/v2/markets?series_ticker=KXBTC15M&status=open`` →
-``markets[].ticker``. Reuses ``settlement.enumerate_markets`` (cursor pagination) + its fetcher.
+Live-market discovery (PUBLIC REST, no auth): the tradeable KXBTC15M market is ``status=active``,
+NOT ``open`` — the ``?status=open`` SERVER filter returns 0 mid-window (caused the 2026-10-18 11h
+outage). So we enumerate a close-time window around ``now`` and classify LIVE client-side by status
+value (``active``/``open``, with an ``open_time<=now<close_time`` fallback), the same client-side
+approach used for ``initialized`` upcoming windows. Reuses ``settlement.enumerate_markets`` (cursor
+pagination) + its fetcher.
 
 TESTABILITY: every piece of decision logic is pure and socket-free — ``diff_tickers`` (open-set →
 add/remove), :class:`DynamicSubscriptionManager` (sid capture, message building, applied-state), and
@@ -47,6 +50,7 @@ from .settlement import (
     WINDOW_S,
     Fetcher,
     enumerate_markets,
+    iso_to_ns,
     _default_fetch,
 )
 
@@ -69,23 +73,67 @@ DEFAULT_REMOVE_GRACE_S = 120.0
 _ID_START = 1000  # update_subscription frame ids start here (distinct from the initial subscribe id=1)
 
 
-# --------------------------------------------------------------------------------------
-# Open-market discovery (PUBLIC REST, no auth) — reuses settlement.py's paginating fetcher.
-# --------------------------------------------------------------------------------------
-def discover_open_tickers(
-    fetch: Fetcher = _default_fetch, series: str = SERIES, base: str = PROD_BASE
-) -> list[str]:
-    """Return the currently-open market tickers for ``series`` (reads only, public).
+# Statuses observed on KXBTC15M (live): a TRADEABLE market is ``active`` (NOT ``open`` — the
+# ``status=open`` server filter returns 0 mid-market, REV-019 / 11h-outage incident 2026-10-18);
+# the next windows are ``initialized``; settled ones are ``finalized``.
+_LIVE_STATUSES = frozenset({"active", "open"})
+_TERMINAL_STATUSES = frozenset({"finalized", "settled", "closed", "determined"})
 
-    ``GET /markets?series_ticker=<series>&status=open`` fully paginated via ``cursor``. ``fetch``
-    is injectable (a FAKE in tests) so this runs with no network.
+
+# --------------------------------------------------------------------------------------
+# Market discovery (PUBLIC REST, no auth) — reuses settlement.py's paginating fetcher.
+#
+# CRITICAL (FIX 1): the ``status=open`` SERVER filter is UNRELIABLE for KXBTC15M — the currently
+# tradeable market is ``status=active`` and ``?status=open`` returns 0 markets mid-window. So we
+# NEVER trust that server filter for live discovery: we enumerate a close-time window and classify
+# CLIENT-SIDE by status value (and an open_time/close_time fallback for any unknown status), exactly
+# as ``discover_upcoming_tickers`` already does for ``initialized``.
+# --------------------------------------------------------------------------------------
+def _ns_to_s(ns: int | None) -> float | None:
+    return None if ns is None else ns / 1e9
+
+
+def _is_live(market: dict, now_s: float) -> bool:
+    """True if ``market`` is tradeable NOW. Primary signal: status ``active``/``open``. For an
+    unknown (not live, not terminal, not initialized) status, fall back to
+    ``open_time <= now < close_time``."""
+    status = market.get("status")
+    if status in _LIVE_STATUSES:
+        return True
+    if status in _TERMINAL_STATUSES or status == "initialized":
+        return False
+    open_s = _ns_to_s(iso_to_ns(market.get("open_time")))
+    close_s = _ns_to_s(iso_to_ns(market.get("close_time")))
+    if open_s is not None and close_s is not None:
+        return open_s <= now_s < close_s
+    return False
+
+
+def discover_open_tickers(
+    fetch: Fetcher = _default_fetch,
+    series: str = SERIES,
+    base: str = PROD_BASE,
+    *,
+    now_s: float | None = None,
+) -> list[str]:
+    """Return the currently-LIVE (tradeable) market tickers for ``series`` (reads only, public).
+
+    Does NOT use the ``status=open`` server filter (unreliable — see FIX 1 above). Enumerates a
+    close-time window straddling ``now`` (``[now - 2 min, now + 15 min + 2 min]``, so a market that
+    opened up to a full window ago is still captured) and keeps those that are live client-side
+    (:func:`_is_live`). ``fetch``/``now_s`` are injectable so this runs with no network.
     """
-    params = {"series_ticker": series, "status": "open", "limit": 1000}
+    now_s = time.time() if now_s is None else now_s
+    params = {
+        "series_ticker": series,
+        "min_close_ts": int(now_s - 120),
+        "max_close_ts": int(now_s + WINDOW_S + 120),
+        "limit": 1000,
+    }
     out: list[str] = []
     for m in enumerate_markets(params, fetch, base):
-        ticker = m.get("ticker")
-        if ticker:
-            out.append(ticker)
+        if m.get("ticker") and _is_live(m, now_s):
+            out.append(m["ticker"])
     return out
 
 
@@ -132,12 +180,13 @@ def discover_target_tickers(
     now_s: float,
     max_upcoming: int = DEFAULT_MAX_UPCOMING,
 ) -> list[str]:
-    """Desired subscription set = currently-OPEN markets PLUS the imminent UPCOMING window(s).
+    """Desired subscription set = currently-LIVE markets PLUS the imminent UPCOMING window(s).
 
-    Open markets first (order preserved), then any upcoming ticker not already open. Subscribing the
+    Live markets first (order preserved), then any upcoming ticker not already live. Subscribing the
     upcoming market BEFORE it opens means its data flows with ZERO gap at the :00/:15/:30/:45 roll.
+    (Closed-within-grace markets are retained by the manager, not re-discovered here.)
     """
-    open_tickers = discover_open_tickers(fetch, series, base)
+    open_tickers = discover_open_tickers(fetch, series, base, now_s=now_s)
     upcoming = discover_upcoming_tickers(
         fetch, series, base, now_s=now_s, max_upcoming=max_upcoming
     )
@@ -367,9 +416,13 @@ async def run_poller(  # pragma: no cover - requires a live socket + REST
             # the next tick re-diffs). A deeper fix = reconcile against the ``ok``/``error`` frames
             # and roll back / retry.
             manager.apply_update(to_add, to_remove)
+            # FIX 2: free each dropped market's book so ``processor.books`` stays bounded to
+            # live + upcoming + recently-closed rather than growing by ~45 markets/11h.
+            for t in to_remove:
+                processor.evict_market(t)
             logger.info(
-                "kalshi dynamic: +%d -%d markets (now %d subscribed)",
-                len(to_add), len(to_remove), len(manager.subscribed),
+                "kalshi dynamic: +%d -%d markets (now %d subscribed, %d books tracked)",
+                len(to_add), len(to_remove), len(manager.subscribed), len(processor.books),
                 extra={"event": "kalshi_dynamic_update", "added": to_add, "removed": to_remove},
             )
         except Exception as exc:  # noqa: BLE001 - never let one bad tick kill the poller

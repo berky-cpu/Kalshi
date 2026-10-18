@@ -204,7 +204,8 @@ def _fake_kalshi_fetch_factory():
 
     def fetch(url):
         calls.append(url)
-        return {"markets": [{"ticker": t} for t in _OPEN], "cursor": ""}
+        # Live markets are status=active (NOT open — see FIX 1); discovery classifies client-side.
+        return {"markets": [{"ticker": t, "status": "active"} for t in _OPEN], "cursor": ""}
 
     return fetch, calls
 
