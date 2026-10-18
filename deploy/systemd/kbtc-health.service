@@ -3,8 +3,12 @@
 [Unit]
 Description=kbtc recorder health report
 Documentation=file:///opt/kbtc/docs/feeds.md
-# Wire an alert (email/push/webhook) by dropping in an OnFailure= handler unit, e.g.:
-#   OnFailure=kbtc-alert@%n.service
+# NO OnFailure here (alerting #3b, option b). The health CLI exits non-zero on ANY unhealthy feed,
+# which — via the cross-feed late-start gate (down_from_start) — includes a single feed that was
+# recently restarted while the others kept running (a brief, self-healing state). Paging on that
+# would false-alarm on every routine systemd restart. Genuine data-staleness is paged instead by
+# the dedicated kbtc-liveness backstop, which gates strictly on newest-DATA-frame age (never on the
+# late-start flag). This unit still runs + logs the full report for observability.
 
 [Service]
 Type=oneshot

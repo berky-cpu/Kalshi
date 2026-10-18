@@ -5,6 +5,8 @@ Description=kbtc KXBTC15M settlement capture
 Documentation=file:///opt/kbtc/docs/facts.md
 After=network-online.target
 Wants=network-online.target
+# Page on a settlement-capture error (alerting #3b). %n = this unit's full name.
+OnFailure=kbtc-alert@%n.service
 
 [Service]
 Type=oneshot
