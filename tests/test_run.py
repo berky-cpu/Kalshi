@@ -190,3 +190,84 @@ def test_kalshi_missing_key_path_exits_nonzero(monkeypatch):
 def test_unknown_feed_rejected(full_env):
     with pytest.raises(KeyError):
         run.build_feed("nope")
+
+
+# ----------------------------------------------------------------------------------------
+# Kalshi dynamic vs static ticker modes (ROADMAP 1.3). Both must build with NO network.
+# ----------------------------------------------------------------------------------------
+_OPEN = ["KXBTC15M-26OCT161500-B50000", "KXBTC15M-26OCT161515-B50000"]
+
+
+def _fake_kalshi_fetch_factory():
+    """A fake REST fetcher returning the open-market page; records that it was called."""
+    calls = []
+
+    def fetch(url):
+        calls.append(url)
+        return {"markets": [{"ticker": t} for t in _OPEN], "cursor": ""}
+
+    return fetch, calls
+
+
+def test_kalshi_static_mode_subscribes_to_fixed_tickers_no_poller(full_env, monkeypatch):
+    monkeypatch.setenv("KBTC_KALSHI_TICKERS", "KXBTC15M-A,KXBTC15M-B")
+    monkeypatch.delenv("KBTC_KALSHI_SERIES", raising=False)
+    feed = run.build_feed("kalshi", signer_factory=_stub_signer_factory)
+    # Static mode: one fixed subscribe, three channels, NO background poller, NO subscribe_factory.
+    assert feed.on_connect is None
+    assert feed.io_config.subscribe_factory is None
+    sub = feed.io_config.subscribe_messages[0]
+    assert sub["params"]["market_tickers"] == ["KXBTC15M-A", "KXBTC15M-B"]
+    assert set(sub["params"]["channels"]) == {"orderbook_delta", "trade", "market_lifecycle_v2"}
+
+
+def test_kalshi_dynamic_mode_wires_factory_and_poller_no_network(full_env, monkeypatch):
+    monkeypatch.delenv("KBTC_KALSHI_TICKERS", raising=False)
+    monkeypatch.setenv("KBTC_KALSHI_SERIES", "KXBTC15M")
+    fetch, calls = _fake_kalshi_fetch_factory()
+
+    feed = run.build_feed("kalshi", signer_factory=_stub_signer_factory, kalshi_fetch=fetch)
+
+    # Building must NOT hit the network (the fetch fires only at connect, inside subscribe_factory).
+    assert calls == []
+    assert feed.on_connect is not None  # background poller launcher
+    assert feed.io_config.subscribe_factory is not None
+
+    # Invoking the per-connect subscribe_factory discovers the open markets and subscribes to them.
+    subs = feed.io_config.subscribe_factory()
+    assert calls, "discovery fetch should run at connect"
+    sub = subs[0]
+    assert sub["params"]["market_tickers"] == _OPEN
+    assert set(sub["params"]["channels"]) == {"orderbook_delta", "trade"}
+
+
+def test_kalshi_static_wins_when_both_env_set(full_env, monkeypatch):
+    # A one-off ticker override is explicit: static takes precedence over the dynamic series.
+    monkeypatch.setenv("KBTC_KALSHI_TICKERS", "KXBTC15M-ONE")
+    monkeypatch.setenv("KBTC_KALSHI_SERIES", "KXBTC15M")
+    feed = run.build_feed("kalshi", signer_factory=_stub_signer_factory)
+    assert feed.on_connect is None
+    assert feed.io_config.subscribe_messages[0]["params"]["market_tickers"] == ["KXBTC15M-ONE"]
+
+
+def test_kalshi_dynamic_subscribe_factory_clears_stale_sids(full_env, monkeypatch):
+    # F2: a reconnect reuses the processor; subscribe_factory must drop stale per-channel sids from
+    # the previous connection before re-subscribing, so the poller never targets a dead sid.
+    monkeypatch.delenv("KBTC_KALSHI_TICKERS", raising=False)
+    monkeypatch.setenv("KBTC_KALSHI_SERIES", "KXBTC15M")
+    fetch, _ = _fake_kalshi_fetch_factory()
+    feed = run.build_feed("kalshi", signer_factory=_stub_signer_factory, kalshi_fetch=fetch)
+    proc = feed.processors[0]
+    proc.sid_by_channel = {"orderbook_delta": 99, "trade": 98}  # stale from a prior connection
+    feed.io_config.subscribe_factory()  # simulate (re)connect
+    assert proc.sid_by_channel == {}
+
+
+def test_kalshi_dynamic_channels_configurable(full_env, monkeypatch):
+    monkeypatch.delenv("KBTC_KALSHI_TICKERS", raising=False)
+    monkeypatch.setenv("KBTC_KALSHI_SERIES", "KXBTC15M")
+    monkeypatch.setenv("KBTC_KALSHI_CHANNELS", "orderbook_delta")
+    fetch, _ = _fake_kalshi_fetch_factory()
+    feed = run.build_feed("kalshi", signer_factory=_stub_signer_factory, kalshi_fetch=fetch)
+    subs = feed.io_config.subscribe_factory()
+    assert subs[0]["params"]["channels"] == ["orderbook_delta"]

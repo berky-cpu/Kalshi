@@ -149,8 +149,17 @@ a process restart.
 - **Kraken token refresh:** the WS token (~900 s TTL) is re-fetched on every (re)connect, so a long
   in-process reconnect is covered. Confirm the key has **"WebSocket interface — On"** permission and
   read-only (no trade) scope.
-- **Kalshi subscription scope + resync** are UNVERIFIED pending ROADMAP 1.1b (resync is a fail-safe
-  no-op; raw is still persisted). Set `KBTC_KALSHI_TICKERS` once the KXBTC15M scope is confirmed.
+- **Kalshi dynamic ticker capture (ROADMAP 1.3):** set `KBTC_KALSHI_SERIES=KXBTC15M` for 24/7
+  capture — the recorder discovers open markets (public REST) and tracks the 15-min roll via
+  `update_subscription` add/delete on ONE connection (VERIFIED on the wire 2026-10-17; see
+  docs/feeds.md). `KBTC_KALSHI_TICKERS` (static, no poller) still exists for a one-off window and
+  takes precedence if both are set. Gap **resync** remains a fail-safe no-op pending ROADMAP 1.1b
+  sid-pruning (raw is always persisted). Tune `KBTC_KALSHI_POLL_S` / `KBTC_KALSHI_CHANNELS` if needed.
+  WS error frames (code 26 = per-sub market limit, 27 = rate limit) now LOG a WARNING
+  (`event=kalshi_ws_error`) instead of being silently dropped. **Known fast-follow** (improbable at
+  KXBTC15M's ~1-2 open markets, now observable via that WARNING): the poller advances its applied
+  state on a successful send, not on the server `ok`, and does not yet roll back / retry on an
+  error-26/27 reject or a partial multi-channel send — a deeper reconcile-against-ack fix is deferred.
 - **Backup target** (`KBTC_BACKUP_REMOTE`) is Berk's decision; the script is remote-agnostic.
 - **Retention/pruning** of old local days after a verified backup is intentionally NOT automated
   here (no destructive deletes until the backup story is signed off); add a prune step later.
