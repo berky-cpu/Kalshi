@@ -127,6 +127,17 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   the continuing one. `kbtc-recorder@kalshi` now enabled on Ashburn with `KBTC_KALSHI_SERIES=KXBTC15M`,
   recording 24/7 (485 msg/s, 0 gaps). **All four recorder groups now live** (Bitstamp + Kraken L3 +
   Coinbase retail L2 + Kalshi book/dynamic + Kalshi settlement).
+  *Roll-gap fix 2026-10-18 (found + fixed via the live dashboard):* the first deploy left a ~49 s hole at
+  each 15-min roll — the new market's OPEN-window (strike-forming 60 s) — because the poller only added it
+  on the next tick. Fixed by PRE-SUBSCRIBING the upcoming market before it opens (`discover_upcoming_tickers`,
+  `status=="initialized"`, hard-cap 2 lookahead; grace-delayed removal keeps a just-closed market's final
+  frames). Live cross-roll re-measure: **max gap 49.1 s → 0.120 s**, new market subscribed 187 s before open.
+  `KBTC_KALSHI_LOOKAHEAD`/`KBTC_KALSHI_REMOVE_GRACE_S` config; poll interval no longer bounds roll coverage.
+  Review [REV-019](notes/reviews/REV-019-kalshi-roll-gap-presubscribe.md) (PASS). **294 tests.**
+  *Also fixed via the dashboard:* both boxes' first unattended nightly B2 backup had failed (EU: rclone.conf
+  root-only vs kbtc-run backup → `640 root:kbtc`; Ashburn: 2 stale partial files tripped `--immutable` →
+  deleted + re-backed-up); both systemd backups now succeed, verified. `deploy/status.sh` (→
+  `/usr/local/bin/kbtc-status`) is the live data-collection dashboard.
   *EU perp box added 2026-10-17* — a Hetzner CX22 (EU, x86_64) because Binance (HTTP 451) and Bybit
   (HTTP 403) **geo-block the US Ashburn IP** (verified). **Live & recording 24/7:** `binance-perp`
   (depthUpdate + persisted REST snapshot → complete books) and `bybit-perp` (orderbook.50 snapshot+delta),

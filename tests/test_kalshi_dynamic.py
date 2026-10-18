@@ -162,8 +162,10 @@ def test_update_subscription_sids_is_single_element_array():
 # --------------------------------------------------------------------------------------
 # Manager: ready gating, build, apply.
 # --------------------------------------------------------------------------------------
-def _ready_manager():
-    m = DynamicSubscriptionManager(channels=("orderbook_delta", "trade"))
+def _ready_manager(grace=0.0):
+    # Default grace=0 so these message-building tests see removals immediately; the grace behaviour
+    # has its own dedicated tests below.
+    m = DynamicSubscriptionManager(channels=("orderbook_delta", "trade"), remove_grace_s=grace)
     m.reset_for_connect([T0, T1])
     m.capture_sids({"orderbook_delta": 7, "trade": 8})
     return m
@@ -180,8 +182,8 @@ def test_manager_not_ready_until_all_channel_sids_acked():
 
 def test_build_update_messages_add_and_delete_per_channel_sid():
     m = _ready_manager()
-    # Open set rolls: T0 closes, T2 opens; T1 stays.
-    to_add, to_remove = m.plan_update([T1, T2])
+    # Open set rolls: T0 closes, T2 opens; T1 stays. (grace=0 → immediate removal)
+    to_add, to_remove = m.plan_update([T1, T2], now_s=0.0)
     assert to_add == [T2] and to_remove == [T0]
     msgs = m.build_update_messages(to_add, to_remove)
     # Channel-major, add before delete: ob add, ob delete, trade add, trade delete.
@@ -199,7 +201,7 @@ def test_build_update_messages_add_and_delete_per_channel_sid():
 
 def test_build_update_messages_add_only():
     m = _ready_manager()
-    to_add, to_remove = m.plan_update([T0, T1, T2])  # only T2 is new
+    to_add, to_remove = m.plan_update([T0, T1, T2], now_s=0.0)  # only T2 is new
     assert to_add == [T2] and to_remove == []
     msgs = m.build_update_messages(to_add, to_remove)
     # One add frame per channel, no delete frames.
@@ -217,20 +219,57 @@ def test_build_update_messages_skips_channel_without_sid():
 
 def test_apply_update_moves_applied_state():
     m = _ready_manager()
-    to_add, to_remove = m.plan_update([T1, T2])
+    to_add, to_remove = m.plan_update([T1, T2], now_s=0.0)
     m.apply_update(to_add, to_remove)
     assert m.subscribed == {T1, T2}
-    # Idempotent: a second diff against the same open set yields nothing.
-    assert m.plan_update([T1, T2]) == ([], [])
+    # Idempotent: a second diff against the same desired set yields nothing.
+    assert m.plan_update([T1, T2], now_s=0.0) == ([], [])
 
 
 def test_reset_for_connect_clears_sids_and_reseeds():
     m = _ready_manager()
-    m.apply_update(*m.plan_update([T1, T2]))
+    m.apply_update(*m.plan_update([T1, T2], now_s=0.0))
     m.reset_for_connect([T2])  # reconnect → fresh subscription
     assert m.subscribed == {T2}
     assert m.sid_by_channel == {}
     assert m.ready() is False
+
+
+# --------------------------------------------------------------------------------------
+# Pre-subscribe upcoming windows + grace-delayed removal (the roll-gap fix).
+# --------------------------------------------------------------------------------------
+def test_grace_delays_removal_of_just_closed_market():
+    m = _ready_manager(grace=120.0)  # keep final frames for 120 s after close
+    m.apply_update(*m.plan_update([T0, T1], now_s=0.0))  # start: both subscribed, nothing pending
+    # T0 closes at t=1000: it leaves the desired set but must NOT be removed yet.
+    to_add, to_remove = m.plan_update([T1], now_s=1000.0)
+    assert to_remove == []  # grace not elapsed
+    # Still within grace (t=1050): still kept.
+    assert m.plan_update([T1], now_s=1050.0)[1] == []
+    # Past grace (t=1000+120): now eligible for removal.
+    to_add, to_remove = m.plan_update([T1], now_s=1121.0)
+    assert to_remove == [T0]
+    m.apply_update(to_add, to_remove)
+    assert m.subscribed == {T1}
+
+
+def test_market_reopening_within_grace_clears_removal_timer():
+    m = _ready_manager(grace=120.0)
+    m.apply_update(*m.plan_update([T0, T1], now_s=0.0))
+    m.plan_update([T1], now_s=100.0)  # T0 absent → timer starts
+    # T0 desired again before grace elapses (e.g. discovery blip) → timer cleared, never removed.
+    to_add, to_remove = m.plan_update([T0, T1], now_s=150.0)
+    assert to_remove == []
+    assert m.plan_update([T1], now_s=160.0)[1] == []  # timer restarts from 160, not 100
+
+
+def test_preadded_upcoming_is_idempotent():
+    # Steady state: T0 open + T1 pre-subscribed (upcoming). Next poll, same target → no re-add.
+    m = _ready_manager(grace=0.0)
+    m.apply_update(*m.plan_update([T0, T1], now_s=0.0))
+    assert m.subscribed == {T0, T1}
+    to_add, to_remove = m.plan_update([T0, T1], now_s=10.0)  # T1 still upcoming/open
+    assert to_add == [] and to_remove == []  # not re-added
 
 
 def test_ids_strictly_increment_across_builds():
@@ -269,6 +308,61 @@ def test_discover_open_tickers_empty():
     assert discover_open_tickers(fake_fetch, base="https://x/v2") == []
 
 
+# A fetcher that routes by the status filter / close-ts window in the URL.
+def _market_fetch(open_rows, upcoming_rows):
+    def fetch(url: str) -> dict:
+        if "status=open" in url:
+            return {"markets": open_rows, "cursor": ""}
+        return {"markets": upcoming_rows, "cursor": ""}  # the min/max close-ts query
+    return fetch
+
+
+def test_discover_upcoming_picks_next_initialized_capped():
+    upcoming_rows = [
+        {"ticker": T1, "status": "initialized", "close_time": "2026-10-18T03:15:00Z"},
+        {"ticker": T2, "status": "initialized", "close_time": "2026-10-18T03:30:00Z"},
+        {"ticker": "ACTIVE", "status": "active", "close_time": "2026-10-18T03:00:00Z"},  # not upcoming
+    ]
+    fetch = _market_fetch([], upcoming_rows)
+    # cap 1 → only the earliest-closing initialized window.
+    assert kalshi_dynamic.discover_upcoming_tickers(
+        fetch, series="KXBTC15M", base="https://x/v2", now_s=0.0, max_upcoming=1) == [T1]
+    # cap 2 → the next two, earliest first.
+    assert kalshi_dynamic.discover_upcoming_tickers(
+        fetch, base="https://x/v2", now_s=0.0, max_upcoming=2) == [T1, T2]
+
+
+def test_discover_upcoming_runaway_guard_hard_cap():
+    rows = [{"ticker": f"K-{i}", "status": "initialized",
+             "close_time": f"2026-10-18T0{i}:00:00Z"} for i in range(1, 6)]
+    fetch = _market_fetch([], rows)
+    # Even asking for 99, never more than the hard cap (2).
+    out = kalshi_dynamic.discover_upcoming_tickers(
+        fetch, base="https://x/v2", now_s=0.0, max_upcoming=99)
+    assert len(out) == 2
+
+
+def test_discover_target_is_open_plus_upcoming():
+    open_rows = [{"ticker": T0}]
+    upcoming_rows = [{"ticker": T1, "status": "initialized",
+                      "close_time": "2026-10-18T03:15:00Z"}]
+    fetch = _market_fetch(open_rows, upcoming_rows)
+    target = kalshi_dynamic.discover_target_tickers(
+        fetch, series="KXBTC15M", base="https://x/v2", now_s=0.0, max_upcoming=1)
+    assert target == [T0, T1]  # open first, then the pre-subscribed upcoming window
+
+
+def test_discover_target_dedupes_open_and_upcoming():
+    # If a market somehow appears in both lists, it's included once.
+    open_rows = [{"ticker": T0}]
+    upcoming_rows = [{"ticker": T0, "status": "initialized", "close_time": "z"},
+                     {"ticker": T1, "status": "initialized", "close_time": "zz"}]
+    fetch = _market_fetch(open_rows, upcoming_rows)
+    target = kalshi_dynamic.discover_target_tickers(
+        fetch, base="https://x/v2", now_s=0.0, max_upcoming=2)
+    assert target == [T0, T1]
+
+
 # --------------------------------------------------------------------------------------
 # End-to-end pure flow: ack → discover → diff → build → apply (no socket).
 # --------------------------------------------------------------------------------------
@@ -279,12 +373,12 @@ def test_full_roll_flow_add_new_drop_closed():
     p.process({"type": "subscribed", "msg": {"channel": "orderbook_delta", "sid": 3}}, 1)
     p.process({"type": "subscribed", "msg": {"channel": "trade", "sid": 4}}, 2)
 
-    m = DynamicSubscriptionManager(channels=("orderbook_delta", "trade"))
+    m = DynamicSubscriptionManager(channels=("orderbook_delta", "trade"), remove_grace_s=0.0)
     m.reset_for_connect([T0, T1])
     m.capture_sids(p.sid_by_channel)
     assert m.ready()
 
-    to_add, to_remove = m.plan_update([T1, T2])
+    to_add, to_remove = m.plan_update([T1, T2], now_s=0.0)
     msgs = m.build_update_messages(to_add, to_remove)
     actions = {(x["params"]["sids"][0], x["params"]["action"]): x["params"]["market_tickers"]
                for x in msgs}
