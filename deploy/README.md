@@ -81,7 +81,10 @@ check `journalctl -u 'kbtc-recorder@<feed>'`.
 ```bash
 sudo apt-get install -y rclone
 sudo RCLONE_CONFIG=/etc/kbtc/rclone.conf rclone config   # add a remote: b2 / s3 / r2 / ...
-sudo chmod 600 /etc/kbtc/rclone.conf
+# The backup unit runs as the `kbtc` user, so the config must be kbtc-READABLE (640 root:kbtc),
+# NOT root-only 600 — else rclone fails "permission denied" and the nightly backup silently fails.
+sudo chown root:kbtc /etc/kbtc/rclone.conf
+sudo chmod 640 /etc/kbtc/rclone.conf
 # set KBTC_BACKUP_REMOTE=<remote>:<bucket>/<path> in /etc/kbtc/env, e.g. b2:my-bucket/kbtc
 ```
 
