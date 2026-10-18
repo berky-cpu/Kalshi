@@ -35,18 +35,37 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Callable
 from typing import Any
 
 from . import kalshi
 from .base import logger
-from .settlement import PROD_BASE, SERIES, Fetcher, enumerate_markets, _default_fetch
+from .settlement import (
+    PROD_BASE,
+    SERIES,
+    WINDOW_S,
+    Fetcher,
+    enumerate_markets,
+    _default_fetch,
+)
 
 # The per-market channels tracked dynamically. orderbook_delta + trade are VERIFIED on the wire for
 # KXBTC15M; configurable (``KBTC_KALSHI_CHANNELS``) so a verified lifecycle channel can be added.
 DYNAMIC_CHANNELS: tuple[str, ...] = ("orderbook_delta", "trade")
 
 DEFAULT_POLL_INTERVAL_S = 45.0  # re-discover cadence (markets roll every 900 s)
+# PRE-SUBSCRIBE lookahead: how many UPCOMING (not-yet-open) windows to subscribe ahead of their
+# open. 1 covers the next boundary with zero gap at the roll; hard-capped at 2 to bound the live
+# subscription (runaway guard). KXBTC15M's strike is the OPEN-WINDOW 60 s BRTI average, so missing a
+# new market's first seconds (the old poll-interval hole) dropped the most important book window —
+# pre-subscribing eliminates that hole.
+DEFAULT_MAX_UPCOMING = 1
+_MAX_UPCOMING_CAP = 2
+# Keep a market subscribed for a grace period AFTER it closes so its final frames (late trades /
+# book changes around settlement) are still captured — don't drop it the instant it leaves the open
+# set.
+DEFAULT_REMOVE_GRACE_S = 120.0
 _ID_START = 1000  # update_subscription frame ids start here (distinct from the initial subscribe id=1)
 
 
@@ -67,6 +86,67 @@ def discover_open_tickers(
         ticker = m.get("ticker")
         if ticker:
             out.append(ticker)
+    return out
+
+
+def discover_upcoming_tickers(
+    fetch: Fetcher = _default_fetch,
+    series: str = SERIES,
+    base: str = PROD_BASE,
+    *,
+    now_s: float,
+    max_upcoming: int = DEFAULT_MAX_UPCOMING,
+) -> list[str]:
+    """Return the next ``max_upcoming`` UPCOMING (``status=="initialized"``) windows, earliest first.
+
+    The next market exists as ``initialized`` before it opens (VERIFIED by the live probe: 1 active
+    + N initialized). We query a bounded close-time window (``[now, now + (max_upcoming+1)·900 s]``)
+    so the fetch itself can't enumerate far-future windows, then client-side keep ``initialized``
+    rows (the ``status`` VALUE is verified; we don't rely on ``status=initialized`` being a valid
+    server *filter*), sort by ``close_time``, and cap at ``max_upcoming`` (hard-capped at 2). Reads
+    only, public. ``fetch``/``now_s`` are injectable so this runs with no network.
+    """
+    max_upcoming = max(0, min(int(max_upcoming), _MAX_UPCOMING_CAP))
+    if max_upcoming == 0:
+        return []
+    horizon_s = WINDOW_S * (max_upcoming + 1)
+    params = {
+        "series_ticker": series,
+        "min_close_ts": int(now_s),
+        "max_close_ts": int(now_s + horizon_s),
+        "limit": 1000,
+    }
+    rows = [
+        m for m in enumerate_markets(params, fetch, base)
+        if m.get("status") == "initialized" and m.get("ticker")
+    ]
+    rows.sort(key=lambda m: m.get("close_time") or "")
+    return [m["ticker"] for m in rows[:max_upcoming]]
+
+
+def discover_target_tickers(
+    fetch: Fetcher = _default_fetch,
+    series: str = SERIES,
+    base: str = PROD_BASE,
+    *,
+    now_s: float,
+    max_upcoming: int = DEFAULT_MAX_UPCOMING,
+) -> list[str]:
+    """Desired subscription set = currently-OPEN markets PLUS the imminent UPCOMING window(s).
+
+    Open markets first (order preserved), then any upcoming ticker not already open. Subscribing the
+    upcoming market BEFORE it opens means its data flows with ZERO gap at the :00/:15/:30/:45 roll.
+    """
+    open_tickers = discover_open_tickers(fetch, series, base)
+    upcoming = discover_upcoming_tickers(
+        fetch, series, base, now_s=now_s, max_upcoming=max_upcoming
+    )
+    seen = set(open_tickers)
+    out = list(open_tickers)
+    for t in upcoming:
+        if t not in seen:
+            out.append(t)
+            seen.add(t)
     return out
 
 
@@ -104,17 +184,25 @@ class DynamicSubscriptionManager:
     """
 
     def __init__(
-        self, channels: tuple[str, ...] = DYNAMIC_CHANNELS, id_start: int = _ID_START
+        self,
+        channels: tuple[str, ...] = DYNAMIC_CHANNELS,
+        id_start: int = _ID_START,
+        remove_grace_s: float = DEFAULT_REMOVE_GRACE_S,
     ) -> None:
         self.channels = tuple(channels)
         self.subscribed: set[str] = set()
         self.sid_by_channel: dict[str, int] = {}
+        self.remove_grace_s = remove_grace_s
+        # ticker -> poll time it was FIRST seen no-longer-desired (closed). Removal waits out
+        # ``remove_grace_s`` from here so a just-closed market's final frames are still captured.
+        self._absent_since: dict[str, float] = {}
         self._next_id = id_start
 
     def reset_for_connect(self, initial_tickers: list[str]) -> None:
         """Seed the applied state for a fresh connection (initial subscribe tickers; sids cleared)."""
         self.subscribed = set(initial_tickers)
         self.sid_by_channel = {}
+        self._absent_since = {}
 
     def capture_sids(self, sid_by_channel: dict[str, int]) -> None:
         """Copy channel→sid captured by the processor from the ``subscribed`` acks."""
@@ -129,9 +217,33 @@ class DynamicSubscriptionManager:
         self._next_id += 1
         return i
 
-    def plan_update(self, open_tickers: list[str] | set[str]) -> tuple[list[str], list[str]]:
-        """Diff the applied ``subscribed`` set against the freshly-discovered open set."""
-        return diff_tickers(self.subscribed, set(open_tickers))
+    def plan_update(
+        self, desired: list[str] | set[str], now_s: float
+    ) -> tuple[list[str], list[str]]:
+        """``(to_add, to_remove)`` for the DESIRED set (open + imminent-upcoming) at time ``now_s``.
+
+        * ``to_add`` — desired markets not yet subscribed (pre-subscribes upcoming windows; already
+          idempotent, since an upcoming market stays subscribed once added and so is not re-added).
+        * ``to_remove`` — subscribed markets that have been NOT desired (closed) for at least
+          ``remove_grace_s``. A just-closed market is kept until the grace elapses so its final
+          frames survive; a market that re-enters ``desired`` before the grace clears its timer.
+
+        Updates the internal removal timers; idempotent for repeated calls at the same ``now_s``.
+        """
+        desired_set = set(desired)
+        to_add = sorted(desired_set - self.subscribed)
+        absent = self.subscribed - desired_set
+        # Clear timers for anything no longer absent (came back, or already removed).
+        for t in list(self._absent_since):
+            if t not in absent:
+                del self._absent_since[t]
+        # Start/keep a timer for each currently-absent subscribed market.
+        for t in absent:
+            self._absent_since.setdefault(t, now_s)
+        to_remove = sorted(
+            t for t in absent if now_s - self._absent_since[t] >= self.remove_grace_s
+        )
+        return to_add, to_remove
 
     def build_update_messages(
         self, to_add: list[str], to_remove: list[str]
@@ -162,6 +274,8 @@ class DynamicSubscriptionManager:
         """Move the applied state AFTER the frames are sent."""
         self.subscribed |= set(to_add)
         self.subscribed -= set(to_remove)
+        for t in to_remove:
+            self._absent_since.pop(t, None)
 
 
 def initial_subscribe_messages(
@@ -183,15 +297,18 @@ async def run_poller(  # pragma: no cover - requires a live socket + REST
     series: str = SERIES,
     base: str = PROD_BASE,
     interval_s: float = DEFAULT_POLL_INTERVAL_S,
+    max_upcoming: int = DEFAULT_MAX_UPCOMING,
+    clock: Callable[[], float] = time.time,
     stop_event: asyncio.Event | None = None,
 ) -> None:
-    """Re-discover open markets on ``interval_s`` and push ``update_subscription`` over ``send``.
+    """Re-discover the TARGET set (open + imminent-upcoming) on ``interval_s`` and push
+    ``update_subscription`` over ``send``.
 
     Runs as a background task started by ``run.py``'s ``on_connect`` hook on each connection, and is
     cancelled on disconnect/shutdown. The REST discovery runs in a thread executor so the blocking
-    ``urllib`` GET never stalls the asyncio read loop. Any error (network, Kalshi error-26/27 frame
-    surfaced elsewhere, discovery failure) is logged and retried next tick — never fatal, never
-    silent.
+    ``urllib`` GET never stalls the asyncio read loop. Pre-subscribing the upcoming window means the
+    new market is live BEFORE its open, so there is no gap at the roll. Any error (network, discovery
+    failure) is logged and retried next tick — never fatal, never silent.
     """
     loop = asyncio.get_running_loop()
     while stop_event is None or not stop_event.is_set():
@@ -214,9 +331,13 @@ async def run_poller(  # pragma: no cover - requires a live socket + REST
                     extra={"event": "kalshi_dynamic_wait"},
                 )
                 continue
+            now_s = clock()
             try:
-                open_tickers = await loop.run_in_executor(
-                    None, lambda: discover_open_tickers(fetch, series, base)
+                target = await loop.run_in_executor(
+                    None,
+                    lambda: discover_target_tickers(
+                        fetch, series, base, now_s=now_s, max_upcoming=max_upcoming
+                    ),
                 )
             except Exception as exc:  # noqa: BLE001 - discovery is best-effort; retry next tick
                 logger.warning(
@@ -224,7 +345,7 @@ async def run_poller(  # pragma: no cover - requires a live socket + REST
                     extra={"event": "kalshi_dynamic_discovery_error"},
                 )
                 continue
-            to_add, to_remove = manager.plan_update(open_tickers)
+            to_add, to_remove = manager.plan_update(target, now_s)
             if not to_add and not to_remove:
                 continue
             msgs = manager.build_update_messages(to_add, to_remove)

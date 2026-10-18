@@ -288,18 +288,32 @@ def _build_kalshi(name: str, env: Mapping[str, str], root: str, *,
         chans_env = env.get("KBTC_KALSHI_CHANNELS")
         channels = (tuple(c.strip() for c in chans_env.split(",") if c.strip())
                     if chans_env else kalshi_dynamic.DYNAMIC_CHANNELS)
-        manager = kalshi_dynamic.DynamicSubscriptionManager(channels=channels)
+        try:
+            max_upcoming = int(env.get("KBTC_KALSHI_LOOKAHEAD", "")
+                               or kalshi_dynamic.DEFAULT_MAX_UPCOMING)
+        except ValueError:
+            max_upcoming = kalshi_dynamic.DEFAULT_MAX_UPCOMING
+        try:
+            grace_s = float(env.get("KBTC_KALSHI_REMOVE_GRACE_S", "")
+                            or kalshi_dynamic.DEFAULT_REMOVE_GRACE_S)
+        except ValueError:
+            grace_s = kalshi_dynamic.DEFAULT_REMOVE_GRACE_S
+        manager = kalshi_dynamic.DynamicSubscriptionManager(
+            channels=channels, remove_grace_s=grace_s)
 
         cfg = kalshi.io_config(tickers=None)
-        # Per-connect: discover open markets, seed the manager's applied state, build the subscribe.
-        # The blocking REST call happens at connect (like Kraken's token fetch), never at build.
+        # Per-connect: discover the TARGET set (open + imminent-upcoming so the next window is
+        # pre-subscribed with no roll gap), seed the manager, and build the subscribe. The blocking
+        # REST call happens at connect (like Kraken's token fetch), never at build.
         def subscribe_factory() -> list[dict]:
-            open_tickers = kalshi_dynamic.discover_open_tickers(fetch, series, kalshi_dynamic.PROD_BASE)
+            now_s = time.time()
+            target = kalshi_dynamic.discover_target_tickers(
+                fetch, series, kalshi_dynamic.PROD_BASE, now_s=now_s, max_upcoming=max_upcoming)
             # F2: a reconnect reuses this processor instance, so drop any stale per-channel sids from
             # the previous connection BEFORE re-subscribing — ready() then waits for the fresh acks.
             proc.reset_subscriptions()
-            manager.reset_for_connect(open_tickers)
-            return kalshi_dynamic.initial_subscribe_messages(open_tickers, channels)
+            manager.reset_for_connect(target)
+            return kalshi_dynamic.initial_subscribe_messages(target, channels)
 
         cfg.subscribe_factory = subscribe_factory
         cfg.header_factory = header_factory
@@ -310,7 +324,8 @@ def _build_kalshi(name: str, env: Mapping[str, str], root: str, *,
             kp = next(p for p in procs if isinstance(p, kalshi.KalshiProcessor))
             task = asyncio.ensure_future(kalshi_dynamic.run_poller(
                 send, kp, manager, fetch=fetch, series=series,
-                base=kalshi_dynamic.PROD_BASE, interval_s=interval, stop_event=stop_event,
+                base=kalshi_dynamic.PROD_BASE, interval_s=interval,
+                max_upcoming=max_upcoming, stop_event=stop_event,
             ))
             return [task]
 
