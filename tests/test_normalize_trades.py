@@ -81,9 +81,11 @@ def test_kalshi_trade_normalized():
     assert len(res.trades) == 1
     t = res.trades[0]
     assert t["venue"] == "kalshi"
-    assert t["side"] == "yes"                 # taker_side
-    assert t["price"] == Decimal("41")        # yes_price in cents
-    assert t["size"] == Decimal("5")          # count (contracts)
+    assert t["side"] == "yes"                      # taker_side (aggressor)
+    assert t["price"] == Decimal("0.4100")         # yes_price_dollars (dollars; no_* is complement)
+    assert t["size"] == Decimal("5.00")            # count_fp (contracts)
+    assert t["trade_id"] == "d290f1ee-6c54-4b01-90e6-d701748f0851"
+    assert t["exch_ts_ns"] == 1760000000500 * 1_000_000   # ts_ms → ns
 
 
 def test_iso_ns_is_exact_integer_nanoseconds_no_float_loss():

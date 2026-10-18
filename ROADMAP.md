@@ -56,7 +56,7 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   (FAIL→PASS; R1 caught a Bitstamp silent book-corruption, fixed via a microtimestamp floor). 101 tests pass.
   *Open:* Bitstamp endpoint/envelope now VERIFIED (human fetch); Binance stream speeds/aggTrade stay PARTIAL
   (doc pages gone). `run_recorder` live-socket loop still unit-untested (exercised by the 1.3 VPS run).
-- [ ] **1.1b Kalshi WS adapter — finalize.** Quick-start WS doc (human fetch, 2026-10-16) VERIFIED the
+- [x] **1.1b Kalshi WS adapter — schema finalized + live-verified 2026-10-17.** Quick-start WS doc (human fetch, 2026-10-16) VERIFIED the
   connection layer: prod/legacy/demo endpoints, auth headers + signing string, subscribe
   `{id,cmd,params:{channels,market_tickers}}`, unsubscribe via `sids`, message types, reconnect+keepalive
   — all match `recorders/kalshi.py`. **Still UNVERIFIED** (the quick-start lacks it; needs the dedicated
@@ -75,11 +75,20 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   `delta_fp`; dollar-string prices, Decimal). An authed capture from the box (Berk provisioned a read-only
   Kalshi key) **confirms on the wire**: payload NESTED under `msg`, `seq` per-sid resetting to 1 per
   reconnect (handled — each snapshot re-anchors), ~40k-level snapshots. Review
-  [REV-017](notes/reviews/REV-017-roadmap-1.1b-kalshi-orderbook-schema.md) (PASS, provisional). **257 tests.**
-  **NOT closed — two blockers remain:** (1) **keepalive** — the capture showed the Kalshi WS dropping ~every
-  4 s (`ping_interval_s=None`, no ping); the 24/7 book recorder must not be enabled until Kalshi's WS
-  keepalive is added + the close reason confirmed; (2) `trade` payload units + unsubscribe-`sids` envelope
-  still UNVERIFIED. Box has Kalshi creds now (key in `/etc/kbtc/env`, PEM `640 root:kbtc`).
+  [REV-017](notes/reviews/REV-017-roadmap-1.1b-kalshi-orderbook-schema.md) (PASS). **257 tests.**
+  **`trade` schema also VERIFIED on the wire:** nested `msg` `{trade_id, yes_price_dollars/no_price_dollars
+  (dollar strings), count_fp, taker_side yes/no, taker_outcome_side, taker_book_side bid/ask, is_block_trade,
+  ts/ts_ms}` — the normalizer now emits price=`yes_price_dollars`/size=`count_fp` (was a wrong cents-int
+  guess); the silent legacy fallback is replaced by a loud schema-drift WARNING.
+  **Reconnect root cause (corrected):** an earlier note wrongly blamed "no keepalive — drops ~every 4 s".
+  That was the OLD adapter raising `KeyError: 'price'` on every delta (`run_recorder` reconnects on any
+  `process()` exception). With the fixed adapter the connection is STABLE — a live box run captured
+  **10,113 frames / 22 s on ONE connection, 0 crashes**; a direct WS probe held 40 s / 27k frames with and
+  without ping. No keepalive needed. Box has Kalshi creds (key in `/etc/kbtc/env`, PEM `640 root:kbtc`).
+  **Schema DONE.** Carried to **1.3 (deploy)**, not schema: continuous 24/7 capture needs dynamic ticker
+  management (KXBTC15M rolls a new market every 15 min vs a static `KBTC_KALSHI_TICKERS`); the in-session
+  resubscribe-resync re-emitting a snapshot and the unsubscribe-`sids` envelope stay INFERRED (the full
+  reconnect→snapshot→re-anchor path IS verified).
 - [x] **1.2** Settlement capture: record every KXBTC15M market's final result and settlement value.
   *Done 2026-10-16:* `src/kbtc/recorders/settlement.py` + tests (78 pass). Review
   [REV-006](notes/reviews/REV-006-roadmap-1.2-settlement.md) (FAIL→PASS, Round 2). Kalshi REST
