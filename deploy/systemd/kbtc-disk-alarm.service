@@ -2,7 +2,8 @@
 # OnFailure alert. A full disk silently drops recorded data, so this runs frequently.
 [Unit]
 Description=kbtc data-partition disk-usage alarm
-# OnFailure=kbtc-alert@%n.service   # wire an alert handler here
+# Page on a disk-usage breach (exit 1/2 → failed → OnFailure). alerting #3b.
+OnFailure=kbtc-alert@%n.service
 
 [Service]
 Type=oneshot

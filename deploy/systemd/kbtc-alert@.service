@@ -1,0 +1,31 @@
+# Failure-alert handler (alerting #3b). Wired as `OnFailure=kbtc-alert@%n.service` on the units
+# that must page (backup, disk-alarm, settlement). systemd starts this with the FAILED unit's full
+# name as the instance (%i), e.g. `kbtc-alert@kbtc-backup.service.service`. It shells out to
+# alert.sh, which POSTs to the ntfy topic in $KBTC_ALERT_URL (read from /etc/kbtc/env; a no-op if
+# unset). READS ONLY — no order path, no secret printed.
+[Unit]
+Description=kbtc failure alert for %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=kbtc
+Group=kbtc
+WorkingDirectory=/opt/kbtc
+# `-` so a missing env file is not itself a failure (alert.sh no-ops when KBTC_ALERT_URL is unset).
+EnvironmentFile=-/etc/kbtc/env
+ExecStart=/opt/kbtc/deploy/alert.sh "kbtc FAILURE: %i" "systemd unit %i failed"
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kbtc-alert
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# curl needs outbound network; no filesystem writes required. AF_NETLINK + AF_UNIX are required for
+# glibc getaddrinfo (DNS): NETLINK enumerates interfaces, UNIX talks to nscd/systemd-resolved — without
+# them curl's name resolution fails and the alert is silently dropped (verified must-fix, REV-022 F1).
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX
