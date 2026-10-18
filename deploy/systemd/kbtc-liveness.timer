@@ -1,0 +1,12 @@
+# Run the feed-liveness backstop every 5 minutes. Thresholds (crypto 180 s, kalshi 420 s) sit above
+# the in-process watchdog timeouts, so this only fires if the self-heal did not recover.
+[Unit]
+Description=Run kbtc feed-liveness backstop every 5 minutes
+
+[Timer]
+OnCalendar=*:0/5
+Persistent=false
+AccuracySec=30
+
+[Install]
+WantedBy=timers.target

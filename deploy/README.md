@@ -134,11 +134,35 @@ systemctl list-timers 'kbtc-*' --no-pager
 sudo -u kbtc /opt/kbtc/.venv/bin/python -m kbtc.recorders.disk_alarm --path /opt/kbtc/data ; echo "exit=$?"
 ```
 
-## 8. Alerting (wire up before the 72 h run)
+## 8. Alerting (ntfy push — wire up before the 72 h run)
 
-The health, backup, and disk-alarm units **exit non-zero on a problem**, which marks the unit
-failed. Attach an `OnFailure=` handler (email / ntfy / webhook) — see the commented lines in those
-`.service` files — e.g. create `kbtc-alert@.service` that posts `%i` to your notifier.
+Failure alerting is a backstop so a silent stall pages us in minutes instead of running unnoticed
+(the 2026-10-18 incident). It uses [ntfy](https://ntfy.sh): a push topic you subscribe to.
+
+**Set up:**
+1. Pick an **unguessable** topic string (the topic is the only access control — treat it like a
+   secret, never commit a real one), e.g. `kbtc-7f3c1a9e2b4d6f80-alerts`.
+2. Put it in `/etc/kbtc/env` on BOTH boxes:
+   `KBTC_ALERT_URL=https://ntfy.sh/kbtc-7f3c1a9e2b4d6f80-alerts` (unset ⇒ alerting disabled, no-op).
+3. Subscribe: ntfy app (iOS/Android) or `https://ntfy.sh` → *Subscribe to topic* → paste the topic.
+4. Install the new units: `kbtc-alert@.service`, `kbtc-liveness.service`, `kbtc-liveness.timer`;
+   `systemctl enable --now kbtc-liveness.timer`. Test: `sudo -u kbtc KBTC_ALERT_URL=... \
+   /opt/kbtc/deploy/alert.sh "kbtc test" "hello from $(hostname -s)"` → a push should arrive.
+
+**What pages:**
+- `deploy/alert.sh` POSTs `$KBTC_ALERT_URL` with a title, the body, and the hostname. It never
+  prints the URL and no-ops cleanly if the URL is unset.
+- `OnFailure=kbtc-alert@%n.service` on **backup**, **disk-alarm**, and **settlement** → a failed
+  sync/verify, a disk-usage breach, or a settlement-capture error pages with the failed unit name.
+- **`kbtc-liveness`** (every 5 min) is the data-staleness catch-all if the in-process watchdog did
+  not self-heal: it pages (naming the feed) when a feed's newest **DATA** frame is older than its
+  threshold (crypto 180 s, kalshi 420 s — both ABOVE the watchdog's 120/300 s). It checks DATA-frame
+  age, NOT file mtime (heartbeats are written to disk too, so mtime stays fresh during a
+  heartbeat-only stall), excludes the `kalshi/settlement` batch dataset, and never keys off the
+  late-start flag — so a routine restart does not false-alarm.
+- The **health** unit has NO `OnFailure` on purpose: its unhealthy verdict can flag a single
+  recently-restarted feed (cross-feed late-start gate), which would page on every routine restart;
+  liveness covers genuine staleness instead. Health still runs and logs for observability.
 
 ## Graceful shutdown / restart
 
@@ -167,6 +191,12 @@ a process restart.
   KXBTC15M's ~1-2 open markets, now observable via that WARNING): the poller advances its applied
   state on a successful send, not on the server `ok`, and does not yet roll back / retry on an
   error-26/27 reject or a partial multi-channel send — a deeper reconcile-against-ack fix is deferred.
+- **Auto-upgrade taming (do this once per box).** `unattended-upgrades` + needrestart will otherwise
+  auto-restart all recorders after a library upgrade (this caused the 2026-10-18 incident). Install:
+  `cp deploy/needrestart-kbtc.conf /etc/needrestart/conf.d/zz-kbtc-no-restart.conf` (list-only — patches
+  still install, services are not bounced) and `cp deploy/apt-99kbtc-no-reboot.conf
+  /etc/apt/apt.conf.d/99kbtc-no-reboot` (no auto-reboot). The in-process data-staleness watchdog +
+  `kbtc-liveness` alert are the defense-in-depth if a restart still happens.
 - **Backup target** (`KBTC_BACKUP_REMOTE`) is Berk's decision; the script is remote-agnostic.
 - **Retention/pruning** of old local days after a verified backup is intentionally NOT automated
   here (no destructive deletes until the backup story is signed off); add a prune step later.

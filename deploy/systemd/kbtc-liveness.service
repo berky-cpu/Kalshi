@@ -1,0 +1,36 @@
+# Feed-liveness backstop (alerting #3b): the out-of-process catch-all if the in-process
+# data-staleness watchdog fails to recover. Checks the age of each feed's newest DATA frame (NOT
+# file mtime — heartbeats are written too) and alerts via alert.sh on a genuinely-stale feed.
+# Triggered by the matching .timer every 5 minutes. READS ONLY.
+#
+# On a STALE feed it alerts DIRECTLY (per feed, so the page names the feed) and exits 0 — so the
+# OnFailure below does NOT double-page on normal stale alerts. OnFailure fires ONLY if the checker
+# itself CRASHES (non-zero exit, e.g. a corrupt file), so a broken backstop can't fail silently
+# (REV-022 F2).
+[Unit]
+Description=kbtc feed-liveness backstop (data-staleness alert)
+After=network-online.target
+Wants=network-online.target
+OnFailure=kbtc-alert@%n.service
+
+[Service]
+Type=oneshot
+User=kbtc
+Group=kbtc
+WorkingDirectory=/opt/kbtc
+# `-` so a missing env file is not a failure; alert.sh no-ops when KBTC_ALERT_URL is unset.
+EnvironmentFile=-/etc/kbtc/env
+ExecStart=/opt/kbtc/.venv/bin/python -m kbtc.recorders.liveness --root /opt/kbtc/data/raw --alert-script /opt/kbtc/deploy/alert.sh
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kbtc-liveness
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# Reads the data tree; alert.sh (curl) needs outbound network. AF_NETLINK + AF_UNIX for getaddrinfo
+# (DNS), else curl resolution fails and the alert is silently dropped (REV-022 F1).
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX
+ReadOnlyPaths=/opt/kbtc/data

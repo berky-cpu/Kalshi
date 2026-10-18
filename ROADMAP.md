@@ -152,8 +152,16 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   Kalshi 300s), it forces a reconnect → re-token/re-discover/re-subscribe. This auto-recovers exactly the
   connected-but-silent stall that caused the 11h incident (minutes, not hours). Review
   [REV-021](notes/reviews/REV-021-data-staleness-watchdog.md) (PASS; can't false-trip at startup, worst case
-  is a benign reconnect, no data loss). **310 tests.** Remaining follow-ups: failure alerting (ntfy) and
-  taming unattended-upgrades.
+  is a benign reconnect, no data loss). **310 tests.**
+  *Alerting + upgrade-taming DONE 2026-10-18:* (#3b) ntfy failure alerting — `OnFailure` push on
+  backup/disk/settlement + an out-of-process `kbtc-liveness` timer (5 min) that pages on a genuinely-stale
+  feed, keyed on newest-DATA-frame age (NOT file mtime — heartbeats keep mtime fresh), thresholds above the
+  watchdog so it only fires if self-heal failed; (#4) `unattended-upgrades`/needrestart set to list-only +
+  auto-reboot off on both boxes so security patches install WITHOUT bouncing the recorders. Review
+  [REV-022](notes/reviews/REV-022-alerting-and-upgrade-taming.md) (PASS; F1 curl-DNS socket-family + F2
+  checker-self-page applied). **323 tests.** The 06:34 incident class is now defended three ways: won't
+  restart → self-heals if it does → alerting backstop. (Not covered: total box death — an external
+  dead-man's-switch is the complement, deferred.)
   *EU perp box added 2026-10-17* — a Hetzner CX22 (EU, x86_64) because Binance (HTTP 451) and Bybit
   (HTTP 403) **geo-block the US Ashburn IP** (verified). **Live & recording 24/7:** `binance-perp`
   (depthUpdate + persisted REST snapshot → complete books) and `bybit-perp` (orderbook.50 snapshot+delta),

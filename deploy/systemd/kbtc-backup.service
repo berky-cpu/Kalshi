@@ -4,7 +4,8 @@
 Description=kbtc daily raw-data backup (rclone)
 After=network-online.target
 Wants=network-online.target
-# OnFailure=kbtc-alert@%n.service   # wire an alert handler here
+# Page on a failed sync/verify (alerting #3b). %n = this unit's full name → the alert names it.
+OnFailure=kbtc-alert@%n.service
 
 [Service]
 Type=oneshot
