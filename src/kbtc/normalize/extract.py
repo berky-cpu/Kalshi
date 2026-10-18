@@ -7,10 +7,13 @@ inherited from ``docs/feeds.md`` (Binance aggTrade field list; Kalshi payload).
 """
 from __future__ import annotations
 
+import logging
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from kbtc.recorders.base import ASK, BID, as_dict
+
+logger = logging.getLogger(__name__)
 
 NS_PER_MS = 1_000_000
 NS_PER_US = 1_000
@@ -195,16 +198,38 @@ def _bybit_trades(msg: Any, channel: str) -> list[dict]:
 
 
 def _kalshi_trades(msg: Any, channel: str) -> list[dict]:
-    """Kalshi ``trade``. ``taker_side`` ("yes"/"no"); ``yes_price`` (cents); ``count`` (contracts).
-    Payload UNVERIFIED (ROADMAP 1.1b) — normalized as recorded."""
+    """Kalshi ``trade`` — VERIFIED from a live authed capture (box, KXBTC15M, 2026-10-17; payload
+    nested under ``msg``). Fields: ``trade_id`` (UUID str), ``market_ticker``, ``yes_price_dollars``
+    / ``no_price_dollars`` (DOLLAR strings, complements), ``count_fp`` (fixed-point size string),
+    ``taker_side`` ("yes"/"no"), ``taker_outcome_side``, ``taker_book_side`` ("bid"/"ask"),
+    ``is_block_trade``, ``ts`` (s), ``ts_ms`` (ms).
+
+    EMIT CONVENTION (documented, consistent across the trades dataset): ``price`` = the **YES**
+    price in dollars (``yes_price_dollars``; ``no_price_dollars`` is its 1−p complement, not stored
+    separately); ``size`` = ``count_fp`` (contracts, Decimal); ``side`` = ``taker_side`` (the
+    aggressor's yes/no side, matching the trades-schema "taker side" semantics). ``exch_ts_ns`` from
+    ``ts_ms``. All Decimal, never float."""
     if not isinstance(msg, dict) or msg.get("type") != "trade":
         return []
-    # Robust to the UNVERIFIED Kalshi msg-wrapper (1.1b): payload may be nested or FLAT.
+    # Kalshi nests the trade payload under ``msg`` (VERIFIED live); stay robust to a FLAT shape too.
     inner = msg.get("msg")
     body = inner if isinstance(inner, dict) else msg
-    price = body.get("yes_price")
-    if price is None:
-        price = body.get("price")
-    return [_row(None, None, "kalshi", body.get("market_ticker", "KXBTC15M"), channel,
+    # VERIFIED (live wire 2026-10-17) dollar-string YES price + fixed-point size. If either verified
+    # field is absent, this is schema drift (Kalshi renamed a field) — surface it LOUDLY and skip the
+    # trade rather than silently mis-parsing a differently-scaled legacy field (e.g. cents-int
+    # ``yes_price``), which would corrupt the tape without any error.
+    price = body.get("yes_price_dollars")
+    size = body.get("count_fp")
+    if price is None or size is None:
+        logger.warning(
+            "kalshi trade missing verified field(s) yes_price_dollars/count_fp (schema drift?); "
+            "skipping trade %s",
+            body.get("trade_id"),
+            extra={"event": "kalshi_trade_schema_drift", "venue": "kalshi"},
+        )
+        return []
+    ts_ms = body.get("ts_ms")
+    exch = int(ts_ms) * NS_PER_MS if ts_ms is not None else None
+    return [_row(None, exch, "kalshi", body.get("market_ticker", "KXBTC15M"), channel,
                  body.get("trade_id"), body.get("taker_side"),
-                 _dec(price), _dec(body.get("count")))]
+                 _dec(price), _dec(size))]

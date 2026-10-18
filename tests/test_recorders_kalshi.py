@@ -24,8 +24,9 @@ def test_orderbook_delta_trade_lifecycle_and_seeded_seq_gap():
     assert Decimal("0.41") not in book["yes"]
     # no side stays 120: the seq-5 'no' delta is dropped by the seq gap below (never silently applied).
     assert book["no"] == {Decimal("0.58"): Decimal("120.00")}
-    # The trade (sid 9) and lifecycle were recorded.
-    assert p.trades and p.trades[0]["count"] == 5
+    # The trade (sid 9, VERIFIED schema) and lifecycle were recorded raw.
+    assert p.trades and p.trades[0]["count_fp"] == "5.00"
+    assert p.trades[0]["yes_price_dollars"] == "0.4100" and p.trades[0]["taker_side"] == "yes"
     assert p.lifecycle and p.lifecycle[0]["status"] == "active"
 
     # Seeded gap on the orderbook sid (sid 7): seq 4 skipped (2,3 then 5) -> gap + resync.

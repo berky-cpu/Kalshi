@@ -79,7 +79,7 @@ CRC32 checksum (incl. worked example `1063832831`), and Binance `pu` rules again
 | Bitstamp `live_orders_{pair}` | constituent | `wss://ws.bitstamp.net` ✓ | public | **`event_id`/`pre_event_id` chain** (`pre_event_id` == prev `event_id`, like Binance `pu`); `since_id` REST backfill | VERIFIED 2026-10-16 (primary WS doc, human fetch) |
 | Binance USDⓈ-M `@depth`+`@aggTrade` | lead signal | `wss://fstream.binance.com` | public | **`pu`** (`pu == prev.u`; ≠ spot's `U==prev.u+1`) | VERIFIED resync/`pu` (speeds/trades/limits PARTIAL) |
 | Bybit v5 linear `orderbook`+`publicTrade` | lead signal | `wss://stream.bybit.com/v5/public/linear` | public | **`type=="snapshot"`** reset (no numeric `u`-gap rule) | VERIFIED incl. trades |
-| Kalshi `orderbook_delta`/`trade`/lifecycle | **trading venue** | `wss://external-api-ws.kalshi.com/trade-api/ws/v2` (legacy `api.elections.kalshi.com`; demo `external-api-ws.demo.kalshi.co`) — all VERIFIED | API key + RSA-PSS/Ed25519 sig over `ts+"GET"+"/trade-api/ws/v2"`, headers `KALSHI-ACCESS-KEY/SIGNATURE/TIMESTAMP` (ms) — READS ONLY, VERIFIED | **orderbook SCHEMA now VERIFIED** (2026-10-17): envelope `type`/`sid`/`seq`; snapshot `yes_dollars_fp`/`no_dollars_fp` (optional `[price_dollars,count_fp]` string pairs); delta `price_dollars`+SIGNED `delta_fp`+`side` yes/no. **LIVE-WIRE CONFIRMED 2026-10-17** (authed capture, KXBTC15M-26OCT172000-00): payload IS NESTED under `msg` (the doc example was flattened); `sid` per-subscription, `seq` per-sid and **RESETS to 1 on each reconnect** (handled — each `orderbook_snapshot` re-anchors `_seq_by_sid`). Real snapshot = 40k-ish levels, dollar-string prices ("0.0010") + fixed-point sizes ("1226720.00"); delta `delta_fp="-100.00"` signed. **unsubscribe-via-`sids` still INFERRED (code marks it UNVERIFIED).** | **orderbook schema VERIFIED (doc + live wire 2026-10-17)**; `trade` payload units still UNVERIFIED (no trade in the capture window). **Pre-deploy blocker (NEW):** the recorder sends NO keepalive (`ping_interval_s=None`) and the Kalshi WS drops the connection ~every 4 s → constant reconnect; must add Kalshi's WS keepalive before the 24/7 book recorder is enabled |
+| Kalshi `orderbook_delta`/`trade`/lifecycle | **trading venue** | `wss://external-api-ws.kalshi.com/trade-api/ws/v2` (legacy `api.elections.kalshi.com`; demo `external-api-ws.demo.kalshi.co`) — all VERIFIED | API key + RSA-PSS/Ed25519 sig over `ts+"GET"+"/trade-api/ws/v2"`, headers `KALSHI-ACCESS-KEY/SIGNATURE/TIMESTAMP` (ms) — READS ONLY, VERIFIED | **orderbook SCHEMA now VERIFIED** (2026-10-17): envelope `type`/`sid`/`seq`; snapshot `yes_dollars_fp`/`no_dollars_fp` (optional `[price_dollars,count_fp]` string pairs); delta `price_dollars`+SIGNED `delta_fp`+`side` yes/no. **LIVE-WIRE CONFIRMED 2026-10-17** (authed capture, KXBTC15M-26OCT172000-00): payload IS NESTED under `msg` (the doc example was flattened); `sid` per-subscription, `seq` per-sid and **RESETS to 1 on each reconnect** (handled — each `orderbook_snapshot` re-anchors `_seq_by_sid`). Real snapshot = 40k-ish levels, dollar-string prices ("0.0010") + fixed-point sizes ("1226720.00"); delta `delta_fp="-100.00"` signed. **unsubscribe-via-`sids` still INFERRED (code marks it UNVERIFIED).** **`trade` SCHEMA now VERIFIED (live wire 2026-10-17)**: nested under `msg` = `trade_id`(UUID), `market_ticker`, `yes_price_dollars`/`no_price_dollars` (DOLLAR strings, complements), `count_fp` (fixed-point size), `taker_side`/`taker_outcome_side` (yes/no), `taker_book_side` (bid/ask), `is_block_trade`, `ts`(s)/`ts_ms`(ms) — NOT the old `yes_price` cents-int. Normalizer emits price=`yes_price_dollars`, size=`count_fp`, side=`taker_side`, exch_ts from `ts_ms`. | **orderbook + trade schemas VERIFIED (doc + live wire 2026-10-17)**; `msg`-wrapper CONFIRMED nested, seq per-sid + resets-to-1-on-reconnect CONFIRMED (handled). **CORRECTION:** the earlier "no-keepalive, drops ~every 4 s" note was WRONG — the ~4 s reconnect was the OLD adapter raising `KeyError: 'price'` on every delta (run_recorder reconnects on any `process()` exception); with the verified-schema adapter the connection is STABLE (10,113 frames / 22 s, 0 crashes, single connection; raw WS also stable with/without ping per a 40 s / 27k-frame probe) — no keepalive needed. unsubscribe-`sids` stays INFERRED. **1.3 deploy follow-up (NOT a 1.1b schema item):** continuous 24/7 capture needs DYNAMIC ticker management — KXBTC15M rolls a new market every 15 min, so static `KBTC_KALSHI_TICKERS` only covers one window. |
 
 ### Feed verification notes
 - We **read market data only** — Coinbase HMAC / Kraken token are used solely to subscribe; no order path in a recorder.
@@ -124,12 +124,24 @@ CRC32 checksum (incl. worked example `1063832831`), and Binance `pu` rules again
   2 dp, e.g. `"-54.00"`), **`side`** (`yes`|`no`), optional `client_order_id`/`ts`(deprecated)/`ts_ms`/`subaccount`.
   This corrected the adapter, which had assumed `price`/`delta`/`yes`/`no` (margin-ws names) and would NOT have
   parsed real frames. Adapter parses prices/sizes as exact Decimal (dollars / fixed-point), never float.
-  **Still UNVERIFIED (need a LIVE capture — Kalshi WS requires auth and the box has no Kalshi creds yet, flagged to
-  Berk):** (1) the `msg`-WRAPPER — the official example shows fields FLAT (top-level) while the margin schema nests
-  them under `msg`; the adapter parses BOTH robustly. (2) seq SCOPE (per-sid vs shared-across-subscription) and
-  reset-on-reconnect — a community source (dev.to) says seq is subscription-wide and a gap should resubscribe the
-  whole subscription (matches our in-band resync); we keep per-sid +1 tracking pending confirmation. 1.1b closure =
-  that real-frame capture.
+- **Kalshi TRADE SCHEMA VERIFIED 2026-10-17** (live authed capture, box, KXBTC15M-26OCT172230-30): `trade` msg
+  nested under `msg` = `trade_id` (UUID str), `market_ticker`, **`yes_price_dollars`** / **`no_price_dollars`**
+  (DOLLAR strings, complements), **`count_fp`** (fixed-point size string), **`taker_side`** (yes/no),
+  `taker_outcome_side` (yes/no), `taker_book_side` (bid/ask), `is_block_trade` (bool), `ts` (s), `ts_ms` (ms) —
+  NOT the old `yes_price` cents-int / `count`. `normalize.extract._kalshi_trades` emits price=`yes_price_dollars`
+  (YES price in dollars; `no_price_dollars` is its 1−p complement, not stored separately), size=`count_fp`,
+  side=`taker_side`, exch_ts_ns from `ts_ms`. Decimal, never float.
+- **Kalshi live-wire resolution 2026-10-17** (authed capture + direct probe): the `msg`-WRAPPER is CONFIRMED
+  **nested** (`{type,sid,seq,msg:{...}}`); the official doc example was flattened. `sid` is per-subscription; `seq`
+  is per-sid and **RESETS to 1 on each reconnect** (handled — every `orderbook_snapshot` re-anchors `_seq_by_sid`).
+  The adapter still parses a FLAT payload robustly as defence-in-depth. **CORRECTION of an earlier misdiagnosis:**
+  the ~4 s reconnect loop was NOT a missing keepalive — it was the OLD adapter raising `KeyError: 'price'` on every
+  delta (run_recorder reconnects on any `process()` exception). With the verified-schema adapter the connection is
+  STABLE: 10,113 frames / 22 s on ONE connection, 0 processor crashes (subscribed:3, delta:9326, trade:783); the
+  raw WS is stable with and without a client ping (40 s / 27k-frame probe) → no keepalive needed. **Still
+  INFERRED:** the unsubscribe-via-`sids` envelope (no live confirmation). **1.3 DEPLOY follow-up (NOT a 1.1b schema
+  item):** continuous 24/7 capture needs DYNAMIC ticker management — KXBTC15M rolls a new market every 15 min, so a
+  static `KBTC_KALSHI_TICKERS` covers only one window. 1.1b schema work is COMPLETE.
 
 ## KXBTC15M settlement fields (ROADMAP 1.2)
 
