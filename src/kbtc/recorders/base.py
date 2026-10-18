@@ -485,6 +485,7 @@ async def run_recorder(  # pragma: no cover - requires a live socket
     *,
     backoff: BackoffPolicy | None = None,
     stop_event=None,
+    on_connect=None,
 ) -> None:
     """Connect→subscribe→persist→process loop with auto-reconnect and resnapshot.
 
@@ -558,17 +559,28 @@ async def run_recorder(  # pragma: no cover - requires a live socket
                         await asyncio.sleep(config.ping_interval_s)
                         await ws.send(config.ping_message)
 
-                hb = asyncio.create_task(_heartbeat())
-                # On (re)connect, REST-snapshot venues (Coinbase/Binance/Bitstamp) MUST fetch the
-                # initial book over HTTP. In-band venues (Kraken/Bybit/Kalshi) already received a
-                # snapshot from ``config.subscribe_messages`` above, so we must NOT also fire the
-                # resubscribe resyncer here — that would open a SECOND subscription and
-                # double-apply deltas. ``resync_on_connect`` makes this correct-by-construction.
-                if getattr(resnapshot, "resync_on_connect", True):
-                    for p in procs:
-                        if p.resync_on_gap:
-                            await resnapshot(p)
+                # F3: create the heartbeat and launch the per-connect background tasks INSIDE the
+                # try, so the finally always cancels the hb task AND any started bg tasks even if the
+                # on_connect hook or the initial resync raises (no leaked tasks on a failed connect).
+                hb = None
+                bg_tasks: list = []
                 try:
+                    hb = asyncio.create_task(_heartbeat())
+                    # Optional per-connect background tasks (Kalshi dynamic-ticker poller, ROADMAP
+                    # 1.3): ``on_connect(send, procs, stop_event) -> list[task]`` gets the
+                    # connection-bound ``_send`` so it can push frames (e.g. ``update_subscription``)
+                    # over THIS socket. Cancelled below so a reconnect starts a fresh poller.
+                    if on_connect:
+                        bg_tasks = list(on_connect(_send, procs, stop_event))
+                    # On (re)connect, REST-snapshot venues (Coinbase/Binance/Bitstamp) MUST fetch the
+                    # initial book over HTTP. In-band venues (Kraken/Bybit/Kalshi) already received a
+                    # snapshot from ``config.subscribe_messages`` above, so we must NOT also fire the
+                    # resubscribe resyncer here — that would open a SECOND subscription and
+                    # double-apply deltas. ``resync_on_connect`` makes this correct-by-construction.
+                    if getattr(resnapshot, "resync_on_connect", True):
+                        for p in procs:
+                            if p.resync_on_gap:
+                                await resnapshot(p)
                     async for raw in ws:
                         recv = now_ns()  # stamp BEFORE parsing (CLAUDE.md convention)
                         writer.write(raw, recv_ts_ns=recv)  # write once, untouched
@@ -580,7 +592,10 @@ async def run_recorder(  # pragma: no cover - requires a live socket
                         if stop_event is not None and stop_event.is_set():
                             break
                 finally:
-                    hb.cancel()
+                    if hb is not None:
+                        hb.cancel()
+                    for t in bg_tasks:
+                        t.cancel()
         except Exception as exc:  # noqa: BLE001 - reconnect on any socket/protocol error
             attempt += 1
             delay = backoff.delay(attempt)

@@ -46,8 +46,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import binance, bitstamp, bybit, coinbase, coinbase_advanced, kalshi, kraken
+from . import kalshi_dynamic
 from . import resync as resync_mod
 from .base import IoConfig, MessageProcessor, logger, run_recorder
+from .settlement import Fetcher
+from .settlement import _default_fetch as settlement_default_fetch
 from .writer import RotatingZstdWriter
 
 DEFAULT_ROOT = "data/raw"
@@ -183,6 +186,10 @@ class BuiltFeed:
     processors: list[MessageProcessor]
     resync_builder: Callable[[Any], Any]
     root: str = DEFAULT_ROOT
+    # Optional per-connect background-task launcher (Kalshi dynamic-ticker poller, ROADMAP 1.3).
+    # ``on_connect(send, processors, stop_event) -> list[asyncio.Task]``; tasks are cancelled on
+    # disconnect/shutdown by ``run_recorder``. ``None`` ⇒ no background tasks (every other feed).
+    on_connect: Any = None
 
     def make_writer(self) -> RotatingZstdWriter:
         return RotatingZstdWriter(self.root, self.venue, self.channel)
@@ -249,19 +256,73 @@ def _build_coinbase_advanced(name: str, env: Mapping[str, str], root: str, **_: 
 
 
 def _build_kalshi(name: str, env: Mapping[str, str], root: str, *,
-                  signer_factory: SignerFactory | None = None, **_: Any) -> BuiltFeed:
-    # Market-data READS from Kalshi production; no order path. Optional ticker filter via
-    # KBTC_KALSHI_TICKERS (comma-separated); absent ⇒ subscribe without a ticker filter (the exact
-    # KXBTC15M subscription scope is UNVERIFIED pending ROADMAP 1.1b).
+                  signer_factory: SignerFactory | None = None,
+                  kalshi_fetch: Fetcher | None = None, **_: Any) -> BuiltFeed:
+    """Market-data READS from Kalshi production; NO order path (CLAUDE.md rule 1).
+
+    Two mutually-exclusive subscription modes (static wins if both env vars are set, so a one-off
+    ticker override is explicit):
+
+    * **Static** — ``KBTC_KALSHI_TICKERS`` (comma-separated): subscribe once to exactly those
+      tickers on orderbook_delta + trade + lifecycle. For tests / one-off captures of a known
+      window. No background poller.
+    * **Dynamic** (``KBTC_KALSHI_SERIES=KXBTC15M``, the 24/7 deploy case): on each connect discover
+      the currently-open markets (public REST) and subscribe; a background poller re-discovers every
+      ``KBTC_KALSHI_POLL_S`` seconds and sends ``update_subscription`` add/delete on the SAME sids as
+      markets roll — one stable connection across the 15-min roll (ROADMAP 1.3).
+    * **Legacy** (neither set): subscribe with no ticker filter (prior behaviour, kept unchanged).
+    """
+    fetch = kalshi_fetch or settlement_default_fetch
     tickers_env = env.get("KBTC_KALSHI_TICKERS")
     tickers = [t.strip() for t in tickers_env.split(",") if t.strip()] if tickers_env else None
+    series = (env.get("KBTC_KALSHI_SERIES") or "").strip() or None
+    header_factory = make_kalshi_header_factory(env, signer_factory=signer_factory)
+    proc = kalshi.KalshiProcessor()
+
+    if series and not tickers:
+        # DYNAMIC MODE — discover + subscribe at connect, poller tracks the roll on one connection.
+        try:
+            interval = float(env.get("KBTC_KALSHI_POLL_S", "") or kalshi_dynamic.DEFAULT_POLL_INTERVAL_S)
+        except ValueError:
+            interval = kalshi_dynamic.DEFAULT_POLL_INTERVAL_S
+        chans_env = env.get("KBTC_KALSHI_CHANNELS")
+        channels = (tuple(c.strip() for c in chans_env.split(",") if c.strip())
+                    if chans_env else kalshi_dynamic.DYNAMIC_CHANNELS)
+        manager = kalshi_dynamic.DynamicSubscriptionManager(channels=channels)
+
+        cfg = kalshi.io_config(tickers=None)
+        # Per-connect: discover open markets, seed the manager's applied state, build the subscribe.
+        # The blocking REST call happens at connect (like Kraken's token fetch), never at build.
+        def subscribe_factory() -> list[dict]:
+            open_tickers = kalshi_dynamic.discover_open_tickers(fetch, series, kalshi_dynamic.PROD_BASE)
+            # F2: a reconnect reuses this processor instance, so drop any stale per-channel sids from
+            # the previous connection BEFORE re-subscribing — ready() then waits for the fresh acks.
+            proc.reset_subscriptions()
+            manager.reset_for_connect(open_tickers)
+            return kalshi_dynamic.initial_subscribe_messages(open_tickers, channels)
+
+        cfg.subscribe_factory = subscribe_factory
+        cfg.header_factory = header_factory
+        # Fallback static list (unused once subscribe_factory is set), for safety/introspection.
+        cfg.subscribe_messages = kalshi.subscribe_messages(None, channels=channels)
+
+        def on_connect(send: Any, procs: list[MessageProcessor], stop_event: Any) -> list[Any]:
+            kp = next(p for p in procs if isinstance(p, kalshi.KalshiProcessor))
+            task = asyncio.ensure_future(kalshi_dynamic.run_poller(
+                send, kp, manager, fetch=fetch, series=series,
+                base=kalshi_dynamic.PROD_BASE, interval_s=interval, stop_event=stop_event,
+            ))
+            return [task]
+
+        rb = resync_mod.kalshi_resync_builder(None)  # gap resync still DISABLED (fail-safe) per 1.1b
+        return BuiltFeed(name, "kalshi", "market", cfg, [proc], rb, root, on_connect=on_connect)
+
+    # STATIC / LEGACY MODE — one subscribe (orderbook_delta + trade + lifecycle), no poller.
     cfg = kalshi.io_config(tickers=tickers)
-    # Subscribe to orderbook_delta + trade + lifecycle on the one authenticated socket.
     cfg.subscribe_messages = kalshi.subscribe_messages(
         tickers, channels=("orderbook_delta", "trade", "market_lifecycle_v2")
     )
-    cfg.header_factory = make_kalshi_header_factory(env, signer_factory=signer_factory)
-    proc = kalshi.KalshiProcessor()
+    cfg.header_factory = header_factory
     rb = resync_mod.kalshi_resync_builder(tickers)  # DISABLED (fail-safe) until 1.1b
     return BuiltFeed(name, "kalshi", "market", cfg, [proc], rb, root)
 
@@ -325,6 +386,7 @@ def build_feed(
     root: str = DEFAULT_ROOT,
     token_fetch: TokenFetch | None = None,
     signer_factory: SignerFactory | None = None,
+    kalshi_fetch: Fetcher | None = None,
 ) -> BuiltFeed:
     """Build a feed by name with no socket and no network access.
 
@@ -344,6 +406,7 @@ def build_feed(
         root,
         token_fetch=token_fetch or kraken_fetch_token,
         signer_factory=signer_factory,
+        kalshi_fetch=kalshi_fetch,
     )
 
 
@@ -379,7 +442,7 @@ async def run_feed(  # pragma: no cover - requires a live socket
                                              "venue": feed.venue, "channel": feed.channel})
     try:
         await run_recorder(feed.io_config, feed.processors, writer, feed.resync_builder,
-                           stop_event=stop_event)
+                           stop_event=stop_event, on_connect=feed.on_connect)
     finally:
         writer.close()
         logger.info("recorder stopped", extra={"event": "stop", "feed": name})

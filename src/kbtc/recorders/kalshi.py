@@ -89,11 +89,16 @@ class KalshiProcessor(MessageProcessor):
                  **kw: Any) -> None:
         super().__init__(product=product, channel=channel, **kw)
         # Book per market_ticker: {side_label: {price: size}}. Side labels are whatever the feed
-        # uses — yes/no (event markets, UNVERIFIED) or bid/ask (perps, VERIFIED).
+        # uses — yes/no (event markets, VERIFIED) or bid/ask (perps, VERIFIED).
         self.books: dict[str, dict[str, dict[Any, Any]]] = {}
         self._seq_by_sid: dict[int, int] = {}
         self.trades: list[dict] = []
         self.lifecycle: list[dict] = []
+        # Dynamic-subscription support (ROADMAP 1.3): capture the server-assigned subscription id
+        # per channel from the ``subscribed`` ack so the dynamic manager can target
+        # ``update_subscription`` at the right ``sid`` without a reconnect. VERIFIED on the wire
+        # (ack ``msg`` = ``{channel, sid}``); re-captured fresh on every (re)connect.
+        self.sid_by_channel: dict[str, int] = {}
 
     def book_for(self, ticker: str) -> dict[str, dict[Any, Any]]:
         return self.books.setdefault(ticker, {})
@@ -172,7 +177,49 @@ class KalshiProcessor(MessageProcessor):
             self.lifecycle.append(body)
             return [{"kind": "lifecycle", **body}]
 
-        return []  # subscribed/ok/error control frames
+        if typ == "subscribed":
+            # Capture channel → server sid from the ack (VERIFIED body ``{channel, sid}``). The sid
+            # may also appear top-level; prefer the body's. Lets the dynamic manager add/remove
+            # markets on this exact subscription with no reconnect (ROADMAP 1.3).
+            self._capture_subscribed(body, sid)
+            return []
+
+        if typ == "error":
+            # An app-level rejection (e.g. code 26 = per-subscription market limit, 27 = command
+            # rate limit — ROADMAP 1.3 / docs.kalshi.com/websockets/websocket-connection). The raw
+            # frame is already persisted by the IO layer; surfacing it at WARNING keeps CLAUDE.md's
+            # "never silent" rule on the dynamic subscription path (a silently-dropped reject would
+            # let the recorder believe it is subscribed to a market it is not). NOT a book gap: no
+            # ``_emit_gap`` (would spuriously arm resync), no crash.
+            self._log_error(body, msg)
+            return []
+
+        return []  # ok/unsubscribed control frames
+
+    def _capture_subscribed(self, body: dict, top_sid: Any) -> None:
+        channel = body.get("channel")
+        ack_sid = body.get("sid", top_sid)
+        if isinstance(channel, str) and ack_sid is not None:
+            self.sid_by_channel[channel] = int(ack_sid)
+
+    def reset_subscriptions(self) -> None:
+        """Forget captured per-channel sids. MUST be called on every (re)connect: the processor
+        instance is reused across reconnects, so a stale sid from the previous connection would let
+        the dynamic poller target a DEAD subscription → silent rejection. Clearing here means
+        ``DynamicSubscriptionManager.ready()`` correctly waits for the FRESH ``subscribed`` acks
+        before any ``update_subscription`` is sent (ROADMAP 1.3 F2)."""
+        self.sid_by_channel.clear()
+
+    def _log_error(self, body: dict, msg: dict) -> None:
+        code = body.get("code", msg.get("code"))
+        detail = body.get("msg") or body.get("message")
+        if isinstance(detail, dict):
+            detail = detail.get("msg") or detail.get("message")
+        self.log.warning(
+            "kalshi WS error frame: code=%s detail=%s (raw persisted; subscription may be rejected)",
+            code, detail,
+            extra={"event": "kalshi_ws_error", "venue": self.venue, "code": code},
+        )
 
     def _apply_snapshot_body(self, body: dict) -> None:
         """Rebuild the book from the VERIFIED snapshot: ``yes_dollars_fp``/``no_dollars_fp`` (both
@@ -245,6 +292,35 @@ def unsubscribe_messages(sids: list[int]) -> list[dict]:
     show ``sid`` as the subscription identifier). Reads only — never an order path.
     """
     return [{"id": 1, "cmd": "unsubscribe", "params": {"sids": list(sids)}}]
+
+
+# update_subscription actions (VERIFIED, docs.kalshi.com/websockets/websocket-connection,
+# 2026-10-17): add/remove markets on a LIVE subscription without reconnecting — keeps the same sid.
+UPDATE_ACTIONS = ("add_markets", "delete_markets", "get_snapshot")
+
+
+def update_subscription_message(
+    sid: int, market_tickers: list[str], action: str, msg_id: int
+) -> dict:
+    """Build a VERIFIED ``update_subscription`` frame for one subscription (``sid``).
+
+    ``{"id":N,"cmd":"update_subscription","params":{"sids":[sid],"market_tickers":[...],
+    "action":...}}`` — ``sids`` is an array of EXACTLY ONE sid (the doc allows singular ``sid`` or
+    the one-element ``sids`` array, never both; we use the array form). ``action`` ∈
+    ``add_markets`` / ``delete_markets`` / ``get_snapshot``. Adding a market makes Kalshi emit an
+    ``orderbook_snapshot`` for it on the SAME sid (VERIFIED). Reads only — never an order path.
+    """
+    if action not in UPDATE_ACTIONS:
+        raise ValueError(f"invalid update_subscription action: {action!r}")
+    return {
+        "id": int(msg_id),
+        "cmd": "update_subscription",
+        "params": {
+            "sids": [int(sid)],
+            "market_tickers": list(market_tickers),
+            "action": action,
+        },
+    }
 
 
 def resubscribe_messages(tickers: list[str] | None = None) -> list[dict]:

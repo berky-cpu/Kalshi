@@ -112,7 +112,15 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   *Deployed 2026-10-17* on a Hetzner CPX31 (Ashburn, US-East). **Live & recording 24/7:** Bitstamp
   (live_orders), Kraken (level3), Kalshi settlement capture, + health/disk timers — all healthy (0 gaps).
   B2 backup WORKING (rclone `[b2]` → `b2:kbtc-data-by/raw`, nightly timer enabled, last run OK).
-  Pending on this box: Coinbase retail (1.1d built — deploy here for the live capture), Kalshi WS book (1.1b).
+  Coinbase retail (1.1d) deployed + live (3rd constituent). Kalshi orderbook schema done (1.1b).
+  *Dynamic Kalshi capture 2026-10-17:* `src/kbtc/recorders/kalshi_dynamic.py` — continuous 24/7 KXBTC15M
+  capture on one stable connection: a connect-time `subscribe_factory` discovers open markets via the public
+  REST, and a background poller (`KBTC_KALSHI_POLL_S`, default 45 s) sends `update_subscription`
+  `add_markets`/`delete_markets` as markets roll (verified envelope + live wire: add on the same sid, no
+  reconnect, ack type `ok`). Modes: dynamic (`KBTC_KALSHI_SERIES=KXBTC15M`), static (`KBTC_KALSHI_TICKERS`),
+  legacy. Error-26/27 rejections now log loudly; stale sids cleared per-reconnect. Review
+  [REV-018](notes/reviews/REV-018-dynamic-kalshi-tickers.md) (PASS; MEDIUMs fixed). **287 tests.** Remaining
+  to deploy here: enable `kbtc-recorder@kalshi` with `KBTC_KALSHI_SERIES` and validate across a 15-min roll.
   *EU perp box added 2026-10-17* — a Hetzner CX22 (EU, x86_64) because Binance (HTTP 451) and Bybit
   (HTTP 403) **geo-block the US Ashburn IP** (verified). **Live & recording 24/7:** `binance-perp`
   (depthUpdate + persisted REST snapshot → complete books) and `bybit-perp` (orderbook.50 snapshot+delta),
