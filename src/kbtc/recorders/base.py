@@ -124,6 +124,60 @@ class BackoffPolicy:
 
 
 # --------------------------------------------------------------------------------------
+# Data-staleness watchdog — the self-heal for a "connected but no data" stall.
+# --------------------------------------------------------------------------------------
+@dataclass
+class DataStalenessMonitor:
+    """Decide when a connection that is still UP but delivering no DATA must be force-reconnected.
+
+    The 2026-10-18 incident: after a restart Kraken/Kalshi stayed connected and emitted only
+    heartbeats/acks for ~11 h; the socket never dropped, so disconnect-based reconnect never fired
+    and nothing self-healed. This monitor measures time since the last DATA frame and declares the
+    feed stale after ``timeout_s`` — forcing ``run_recorder`` to reconnect (which re-runs
+    header_factory / subscribe_factory / on_connect: Kraken re-fetches its token, Kalshi
+    re-discovers + re-subscribes the live market).
+
+    ``classifier(raw) -> bool`` is the venue data-frame classifier (``health.data_classifier``), so
+    "DATA" means EXACTLY what the health report means — heartbeats, subscription acks, pongs and
+    status/error frames do NOT reset the clock (that heartbeat-only state IS the failure). A
+    ``None`` classifier counts every frame (health's fallback for an unclassified venue).
+
+    Pure and socket-free (unit-tested like the gap logic). The baseline resets on each (re)connect
+    (:meth:`on_connect`), so a fresh connection always gets the full ``timeout_s`` of grace before
+    it can trip: it cannot false-trip a healthy feed, only one genuinely silent of data.
+    """
+
+    timeout_s: float | None
+    classifier: Any = None  # Callable[[Any], bool] | None
+    last_data_ns: int = 0
+    connected_since_ns: int = 0
+
+    def on_connect(self, now_ns: int) -> None:
+        """Reset the baseline for a fresh connection (no data yet; grace starts now)."""
+        self.connected_since_ns = now_ns
+        self.last_data_ns = 0
+
+    def observe(self, raw: Any, recv_ns: int) -> bool:
+        """Record a frame. Returns True (and advances the freshness clock) iff it is a DATA frame."""
+        if self.classifier is None or self.classifier(raw):
+            self.last_data_ns = recv_ns
+            return True
+        return False
+
+    def is_stale(self, now_ns: int) -> bool:
+        """True once no DATA frame has arrived for ``timeout_s`` (measured from the last data frame,
+        or from connect if none yet). ``timeout_s=None`` disables (never stale)."""
+        if self.timeout_s is None:
+            return False
+        if self.connected_since_ns <= 0:
+            return False  # on_connect not called yet — no baseline, cannot be stale
+        # Measure from the last DATA frame, or from connect if none has arrived yet (so a fresh
+        # connection gets the full timeout of grace). ``now_ns`` is time.time_ns() in the live loop.
+        baseline = self.last_data_ns or self.connected_since_ns
+        return (now_ns - baseline) >= int(self.timeout_s * 1_000_000_000)
+
+
+# --------------------------------------------------------------------------------------
 # Order books.
 # --------------------------------------------------------------------------------------
 class PriceLevelBook:
@@ -386,6 +440,11 @@ class MessageProcessor(ABC):
         # re-arming ``needs_resnapshot`` — otherwise the IO loop would re-fire resync on every
         # pre-snapshot delta and spam resubscribe frames (Kraken Cloudflare ~150/10 min cap).
         self.awaiting_snapshot = False
+        # recv_ts_ns of the last DATA frame seen on this processor's connection (0 until the first).
+        # Set by ``run_recorder`` via the venue data-frame classifier (``health.data_classifier`` —
+        # heartbeats/acks/control do NOT count); the data-staleness watchdog reads it. Exposed for
+        # observability; the watchdog's own clock is :class:`DataStalenessMonitor`.
+        self.last_data_ns: int = 0
 
     def _emit_gap(
         self, reason: str, recv_ts_ns: int, expected: Any = None, got: Any = None
@@ -475,6 +534,12 @@ class IoConfig:
     # (unbounded) so the complete baseline frame is received instead of silently rejected →
     # reconnect-loop. These are trusted exchange feeds, so unbounded is safe where needed.
     max_size: int | None = 2 ** 20
+    # Data-staleness watchdog (base.DataStalenessMonitor): force a reconnect if the connection stays
+    # UP but delivers no DATA frame for this many seconds (heartbeats/acks do NOT count). Default
+    # 120 s suits every continuous crypto book/trade feed (they update many times/second — 120 s of
+    # silence is unambiguously broken). ``None`` disables. Overridden per feed in run.py where a
+    # feed can be legitimately quieter (Kalshi). Chosen so it CANNOT false-trip a healthy feed.
+    stale_timeout_s: float | None = 120.0
 
 
 async def run_recorder(  # pragma: no cover - requires a live socket
@@ -559,13 +624,44 @@ async def run_recorder(  # pragma: no cover - requires a live socket
                         await asyncio.sleep(config.ping_interval_s)
                         await ws.send(config.ping_message)
 
-                # F3: create the heartbeat and launch the per-connect background tasks INSIDE the
-                # try, so the finally always cancels the hb task AND any started bg tasks even if the
-                # on_connect hook or the initial resync raises (no leaked tasks on a failed connect).
+                # Data-staleness watchdog (self-heal for "connected but no data", incident
+                # 2026-10-18). "DATA" = exactly what the health report counts: use that venue's
+                # classifier so heartbeats/acks/control do NOT reset the clock. Baseline reset now.
+                from .health import data_classifier  # local import: health imports base (no cycle)
+
+                monitor = DataStalenessMonitor(
+                    config.stale_timeout_s, classifier=data_classifier(config.venue))
+                monitor.on_connect(now_ns())
+                for p in procs:
+                    p.last_data_ns = 0  # fresh connection: no data yet
+
+                async def _watchdog() -> None:
+                    if config.stale_timeout_s is None:
+                        return
+                    check_s = max(1.0, min(config.stale_timeout_s / 4.0, 30.0))
+                    while True:
+                        await asyncio.sleep(check_s)
+                        if monitor.is_stale(now_ns()):
+                            logger.warning(
+                                "recorder %s/%s data-stale: no data frame for >= %.0fs while "
+                                "connected; forcing reconnect",
+                                config.venue, config.channel, config.stale_timeout_s,
+                                extra={"event": "data_stale", "venue": config.venue,
+                                       "channel": config.channel,
+                                       "stale_timeout_s": config.stale_timeout_s},
+                            )
+                            await ws.close()  # unblocks the read loop → outer loop reconnects
+                            return
+
+                # F3: create the heartbeat/watchdog and launch the per-connect background tasks
+                # INSIDE the try, so the finally always cancels every task even if the on_connect
+                # hook or the initial resync raises (no leaked tasks on a failed connect).
                 hb = None
+                wd = None
                 bg_tasks: list = []
                 try:
                     hb = asyncio.create_task(_heartbeat())
+                    wd = asyncio.create_task(_watchdog())
                     # Optional per-connect background tasks (Kalshi dynamic-ticker poller, ROADMAP
                     # 1.3): ``on_connect(send, procs, stop_event) -> list[task]`` gets the
                     # connection-bound ``_send`` so it can push frames (e.g. ``update_subscription``)
@@ -584,6 +680,10 @@ async def run_recorder(  # pragma: no cover - requires a live socket
                     async for raw in ws:
                         recv = now_ns()  # stamp BEFORE parsing (CLAUDE.md convention)
                         writer.write(raw, recv_ts_ns=recv)  # write once, untouched
+                        # Reset the staleness clock ONLY on a real DATA frame (not heartbeats/acks).
+                        if monitor.observe(raw, recv):
+                            for p in procs:
+                                p.last_data_ns = recv
                         for p in procs:
                             p.process(raw, recv)
                             if p.needs_resnapshot:
@@ -594,6 +694,8 @@ async def run_recorder(  # pragma: no cover - requires a live socket
                 finally:
                     if hb is not None:
                         hb.cancel()
+                    if wd is not None:
+                        wd.cancel()
                     for t in bg_tasks:
                         t.cancel()
         except Exception as exc:  # noqa: BLE001 - reconnect on any socket/protocol error

@@ -193,6 +193,32 @@ def test_unknown_feed_rejected(full_env):
 
 
 # ----------------------------------------------------------------------------------------
+# Data-staleness watchdog: per-feed stale_timeout_s (crypto default 120s; Kalshi 300s).
+# ----------------------------------------------------------------------------------------
+def test_stale_timeout_per_feed(full_env, monkeypatch):
+    # Kalshi dynamic too, so the override applies in the dynamic branch as well.
+    monkeypatch.setenv("KBTC_KALSHI_SERIES", "KXBTC15M")
+    monkeypatch.delenv("KBTC_KALSHI_TICKERS", raising=False)
+    fetch, _ = _fake_kalshi_fetch_factory()
+    for name in ALL_FEEDS:
+        feed = run.build_feed(name, token_fetch=_stub_token,
+                              signer_factory=_stub_signer_factory, kalshi_fetch=fetch)
+        st = feed.io_config.stale_timeout_s
+        if feed.venue == "kalshi":
+            assert st == run.KALSHI_STALE_TIMEOUT_S == 300.0, name
+        else:
+            # Continuous crypto feeds keep the safe 120 s default (cannot false-trip).
+            assert st == 120.0, name
+
+
+def test_kalshi_static_mode_also_gets_stale_override(full_env, monkeypatch):
+    monkeypatch.setenv("KBTC_KALSHI_TICKERS", "KXBTC15M-A")
+    monkeypatch.delenv("KBTC_KALSHI_SERIES", raising=False)
+    feed = run.build_feed("kalshi", signer_factory=_stub_signer_factory)
+    assert feed.io_config.stale_timeout_s == 300.0
+
+
+# ----------------------------------------------------------------------------------------
 # Kalshi dynamic vs static ticker modes (ROADMAP 1.3). Both must build with NO network.
 # ----------------------------------------------------------------------------------------
 _OPEN = ["KXBTC15M-26OCT161500-B50000", "KXBTC15M-26OCT161515-B50000"]
