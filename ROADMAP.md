@@ -119,8 +119,14 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   `add_markets`/`delete_markets` as markets roll (verified envelope + live wire: add on the same sid, no
   reconnect, ack type `ok`). Modes: dynamic (`KBTC_KALSHI_SERIES=KXBTC15M`), static (`KBTC_KALSHI_TICKERS`),
   legacy. Error-26/27 rejections now log loudly; stale sids cleared per-reconnect. Review
-  [REV-018](notes/reviews/REV-018-dynamic-kalshi-tickers.md) (PASS; MEDIUMs fixed). **287 tests.** Remaining
-  to deploy here: enable `kbtc-recorder@kalshi` with `KBTC_KALSHI_SERIES` and validate across a 15-min roll.
+  [REV-018](notes/reviews/REV-018-dynamic-kalshi-tickers.md) (PASS; MEDIUMs fixed). **287 tests.**
+  **Cross-roll validated + DEPLOYED 2026-10-18:** a live run spanning the 03:30Z roll captured 242,872
+  records with **0 reconnects** (2 subscribe acks for the whole 10-min window) and the new market
+  (`...2345-45`) auto-added **20 s after the boundary** (= the poll interval) via `update_subscription`
+  (4 `ok` acks), getting its snapshot on the same connection — new market picked up with no disruption to
+  the continuing one. `kbtc-recorder@kalshi` now enabled on Ashburn with `KBTC_KALSHI_SERIES=KXBTC15M`,
+  recording 24/7 (485 msg/s, 0 gaps). **All four recorder groups now live** (Bitstamp + Kraken L3 +
+  Coinbase retail L2 + Kalshi book/dynamic + Kalshi settlement).
   *EU perp box added 2026-10-17* — a Hetzner CX22 (EU, x86_64) because Binance (HTTP 451) and Bybit
   (HTTP 403) **geo-block the US Ashburn IP** (verified). **Live & recording 24/7:** `binance-perp`
   (depthUpdate + persisted REST snapshot → complete books) and `bybit-perp` (orderbook.50 snapshot+delta),
