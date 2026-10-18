@@ -146,8 +146,14 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   (`_is_live`: active/open live, time-window fallback; no `status=open` filter); memory bounded O(1)
   (`trades`/`lifecycle` → capped deques, per-market `books` evicted on removal/settle, `_seq_by_sid` cleared
   on reconnect). Review [REV-020](notes/reviews/REV-020-kalshi-incident-active-discovery-memleak.md) (PASS).
-  **300 tests.** Follow-ups in-flight: recorder self-heal (detect no-data-despite-heartbeats → reconnect),
-  failure alerting, and taming unattended-upgrades.
+  **300 tests.**
+  *Self-heal DONE 2026-10-18:* `run_recorder` now has a `DataStalenessMonitor` watchdog — if no DATA frame
+  (heartbeats/acks don't count, via health's data classifier) arrives for `stale_timeout_s` (crypto 120s,
+  Kalshi 300s), it forces a reconnect → re-token/re-discover/re-subscribe. This auto-recovers exactly the
+  connected-but-silent stall that caused the 11h incident (minutes, not hours). Review
+  [REV-021](notes/reviews/REV-021-data-staleness-watchdog.md) (PASS; can't false-trip at startup, worst case
+  is a benign reconnect, no data loss). **310 tests.** Remaining follow-ups: failure alerting (ntfy) and
+  taming unattended-upgrades.
   *EU perp box added 2026-10-17* — a Hetzner CX22 (EU, x86_64) because Binance (HTTP 451) and Bybit
   (HTTP 403) **geo-block the US Ashburn IP** (verified). **Live & recording 24/7:** `binance-perp`
   (depthUpdate + persisted REST snapshot → complete books) and `bybit-perp` (orderbook.50 snapshot+delta),
