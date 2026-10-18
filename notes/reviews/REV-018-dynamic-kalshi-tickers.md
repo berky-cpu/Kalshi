@@ -62,3 +62,14 @@ back/retried, and the F5 partial multi-channel-send duplicate edge self-corrects
 improbable at KXBTC15M's ~1–2 open markets and now LOUD via F1, with reconnect self-heal. The full
 reconcile-against-`ok`/`error` is the accepted deferred item. The end-to-end 15-min roll was not observed
 live (only the mechanism it relies on) — the deployed cross-roll run is the operational confirmation.
+
+## Cross-roll validation + deploy (2026-10-18) — PASS
+Live run from the new code spanning the 03:30Z roll: **242,872 records, 0 unparseable lines,
+`subscribed_acks=2`** (one connection — ZERO reconnects over the 10-min window), `update_subscription`
+**4 `ok` acks**, and TWO distinct markets in the orderbook stream:
+`KXBTC15M-26OCT172330-30` (seen from run start) and `KXBTC15M-26OCT172345-45` **first seen 03:30:20Z** — the
+poller auto-added the new 15-min market 20 s after the boundary (= the 20 s poll interval), getting its
+snapshot on the SAME connection with no disruption to the continuing market. End-to-end roll confirmed.
+Deployed: `kbtc-recorder@kalshi` enabled on Ashburn with `KBTC_KALSHI_SERIES=KXBTC15M`, recording 24/7
+(485 msg/s, 0 gaps/0 gap-time). The deferred reconcile-on-`ok`/`error` (applied-state) remains the accepted
+fast-follow.
