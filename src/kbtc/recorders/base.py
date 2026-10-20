@@ -181,13 +181,27 @@ class DataStalenessMonitor:
 # Order books.
 # --------------------------------------------------------------------------------------
 class PriceLevelBook:
-    """Aggregated price→size book (Binance/Bybit diff-depth style)."""
+    """Aggregated price→size book (Binance/Bybit diff-depth / Coinbase level2 style).
+
+    PERFORMANCE (REV-013, extended from ``OrderIdBook``): ``bids``/``asks`` are kept sorted by
+    price in a ``SortedDict`` (keyed Decimal price ascending), which IS the authoritative
+    price→qty aggregate — there is no separate order store to reconcile. So ``levels(side, n)``
+    reads the top-``n`` off the maintained ends in O(n), and ``best_bid``/``best_ask`` read a single
+    end, instead of the old ``sorted(d.items())`` over ALL price levels on EVERY event. That full
+    re-sort pegged a core normalizing Coinbase level2 (its opening snapshot alone is ~40k levels,
+    and ``_emit_book`` calls ``levels`` per event). ``SortedDict`` subclasses ``dict``, so
+    ``bids``/``asks`` keep dict semantics (``[]``/``in``/``== {...}``) for existing callers/tests.
+
+    NOTE: iterating ``bids``/``asks`` directly now yields keys in ascending-price order (SortedDict),
+    not plain-dict insertion order. No current caller relies on insertion order (REV-024 F1); use
+    ``levels()`` for ordered top-of-book rather than assuming the attribute's iteration order.
+    """
 
     def __init__(self) -> None:
-        self.bids: dict[Decimal, Decimal] = {}
-        self.asks: dict[Decimal, Decimal] = {}
+        self.bids: SortedDict = SortedDict()
+        self.asks: SortedDict = SortedDict()
 
-    def _side(self, side: str) -> dict[Decimal, Decimal]:
+    def _side(self, side: str) -> SortedDict:
         return self.bids if side == BID else self.asks
 
     def set(self, side: str, price: Any, qty: Any) -> None:
@@ -195,7 +209,7 @@ class PriceLevelBook:
         d = self._side(side)
         p, q = _dec(price), _dec(qty)
         if q == 0:
-            d.pop(p, None)
+            d.pop(p, None)  # removal path: drop the level from the sorted aggregate
         else:
             d[p] = q
 
@@ -204,16 +218,23 @@ class PriceLevelBook:
         self.asks.clear()
 
     def best_bid(self) -> Decimal | None:
-        return max(self.bids) if self.bids else None
+        return self.bids.keys()[-1] if self.bids else None  # highest bid price
 
     def best_ask(self) -> Decimal | None:
-        return min(self.asks) if self.asks else None
+        return self.asks.keys()[0] if self.asks else None  # lowest ask price
 
     def levels(self, side: str, n: int | None = None) -> list[tuple[Decimal, Decimal]]:
+        """Top-``n`` ``(price, qty)`` best-first (bids high→low, asks low→high); O(n) off the
+        maintained sorted aggregate. ``n is None`` → all; ``n <= 0`` → ``[]``."""
         d = self._side(side)
-        rev = side == BID  # bids high→low, asks low→high
-        out = sorted(d.items(), key=lambda kv: kv[0], reverse=rev)
-        return out[:n] if n is not None else out
+        keys = d.keys()
+        if n is not None and n <= 0:
+            return []
+        if side == BID:  # highest prices first
+            sel = reversed(keys if n is None else keys[-n:])
+        else:  # lowest prices first
+            sel = iter(keys if n is None else keys[:n])
+        return [(p, d[p]) for p in sel]
 
 
 @dataclass
