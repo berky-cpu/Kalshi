@@ -24,8 +24,10 @@ import logging
 import subprocess
 import sys
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -163,6 +165,123 @@ def scan_root(root: str | Path, now_ns_val: int) -> list[FeedLiveness]:
     return out
 
 
+# --------------------------------------------------------------------------------------
+# Fast dashboard status (FIX B) — a few seconds regardless of total data size.
+#
+# ``kbtc-status`` runs under ``watch -n 30``. Calling the full health replay (gap/CRC validation
+# over the window) was minutes on a 5.6 GB tree, so ticks stacked and hammered the box. The
+# dashboard instead uses this: per feed read ONE newest file, report the newest-DATA-frame age (same
+# health.data_classifier as the watchdog/liveness — so a heartbeat-only stall is NOT masked the way
+# file mtime would be) plus a recent msgs/s estimate from that file's trailing window. No alerts.
+# --------------------------------------------------------------------------------------
+RATE_WINDOW_S = 60.0  # recent msgs/s is measured over the newest file's trailing window
+
+
+@dataclass(frozen=True)
+class FeedStatus:
+    venue: str
+    channel: str
+    last_data_ns: int | None
+    age_s: float | None
+    data_per_s: float          # recent DATA msgs/s estimate (trailing RATE_WINDOW_S)
+    threshold_s: float | None  # staleness threshold, or None for an excluded/batch dataset
+    stale: bool
+
+    @property
+    def feed(self) -> str:
+        return f"{self.venue}/{self.channel}"
+
+
+def feed_status(
+    venue: str, channel: str, channel_dir: Path, now_ns_val: int,
+    *, rate_window_s: float = RATE_WINDOW_S, max_files: int = 2,
+) -> FeedStatus | None:
+    """Fast per-feed status from ONE newest file (two only at the hour boundary). Returns ``None``
+    if the feed has no recorded files. ``threshold_s`` is ``None`` for excluded/batch datasets
+    (e.g. ``kalshi/settlement``) — shown informationally but never marked stale."""
+    files = _data_files_newest_first(channel_dir)
+    if not files:
+        return None
+    classifier = data_classifier(venue)
+    window_ns = int(rate_window_s * 1e9)
+    recent: deque[int] = deque()  # DATA timestamps within the trailing window of what we've seen
+    last_data: int | None = None
+    earliest: int | None = None
+    for f in files[:max_files]:
+        had_data = False
+        for rec in read_records(f):
+            ts = rec.get("recv_ts_ns")
+            if ts is None:
+                continue
+            if earliest is None:
+                earliest = ts
+            raw = rec.get("raw")
+            if classifier is None or classifier(raw):
+                last_data = ts
+                had_data = True
+                recent.append(ts)
+                while recent and ts - recent[0] > window_ns:
+                    recent.popleft()
+        if had_data:
+            break  # newest file with data holds the most recent data + its trailing window
+    if len(recent) >= 2 and (recent[-1] - recent[0]) > 0:
+        data_per_s = len(recent) / ((recent[-1] - recent[0]) / 1e9)
+    else:
+        data_per_s = 0.0
+    th = threshold_for(venue, channel)
+    if last_data is not None:
+        age_s = (now_ns_val - last_data) / 1e9
+    elif earliest is not None:
+        age_s = (now_ns_val - earliest) / 1e9  # no data: silent since first (non-data) record
+    else:
+        age_s = None
+    stale = th is not None and age_s is not None and age_s > th
+    return FeedStatus(venue, channel, last_data, age_s, data_per_s, th, stale)
+
+
+def scan_status(root: str | Path, now_ns_val: int) -> list[FeedStatus]:
+    """Fast status for every feed present under ``root`` (including excluded/batch datasets, shown
+    informationally)."""
+    root = Path(root)
+    out: list[FeedStatus] = []
+    if not root.is_dir():
+        return out
+    for venue_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        for channel_dir in sorted(p for p in venue_dir.iterdir() if p.is_dir()):
+            st = feed_status(venue_dir.name, channel_dir.name, channel_dir, now_ns_val)
+            if st is not None:
+                out.append(st)
+    return out
+
+
+def render_status(statuses: list[FeedStatus], now_ns_val: int) -> str:
+    """Compact dashboard table: feed, newest-DATA-frame age, recent msgs/s, live/STALE verdict."""
+    rows = [("FEED", "DATA-AGE", "MSGS/S", "STATUS")]
+    for s in sorted(statuses, key=lambda x: x.feed):
+        if s.age_s is None:
+            age = "no-data"
+        else:
+            age = f"{s.age_s:.0f}s"
+        if s.threshold_s is None:
+            status = "batch"        # excluded dataset (e.g. settlement) — informational only
+        elif s.stale:
+            status = "STALE"
+        else:
+            status = "live"
+        rows.append((s.feed, age, f"{s.data_per_s:.4g}", status))
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    lines = []
+    for ri, r in enumerate(rows):
+        lines.append("  ".join(c.ljust(widths[i]) for i, c in enumerate(r)))
+        if ri == 0:
+            lines.append("  ".join("-" * widths[i] for i in range(len(widths))))
+    ts = datetime.fromtimestamp(now_ns_val / 1e9, tz=UTC)
+    stale_feeds = [s.feed for s in statuses if s.stale]
+    verdict = "all live" if not stale_feeds else f"STALE: {', '.join(stale_feeds)}"
+    lines.append(f"feed data-age @ {ts:%H:%M:%SZ}  [{verdict}]")
+    return "\n".join(lines)
+
+
 def _default_notifier(alert_script: str) -> Notifier:
     """Notifier that shells out to ``deploy/alert.sh`` (which reads ``KBTC_ALERT_URL`` from env).
 
@@ -194,7 +313,15 @@ def main(
     p.add_argument("--root", default="data/raw", help="data root (default: data/raw)")
     p.add_argument("--alert-script", default="deploy/alert.sh",
                    help="path to the ntfy notifier (default: deploy/alert.sh)")
+    p.add_argument("--print-status", action="store_true",
+                   help="fast dashboard view (per-feed data-age + recent msgs/s); prints a table "
+                        "and NEVER alerts — for kbtc-status under watch")
     args = p.parse_args(argv)
+
+    if args.print_status:
+        # Dashboard mode: fast, read-only, no ntfy POST. Always exits 0.
+        print(render_status(scan_status(args.root, clock_ns()), clock_ns()))
+        return 0
 
     notify = notifier or _default_notifier(args.alert_script)
     results = scan_root(args.root, clock_ns())
