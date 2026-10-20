@@ -188,6 +188,52 @@ def test_order_id_book_incremental_aggregate_matches_full_scan_property(seed):
     assert step == steps - 1
 
 
+def _price_book_full_scan_levels(book, side):
+    """Reference best-first levels by a from-scratch full sort of the side dict — exactly the
+    pre-optimization ``PriceLevelBook.levels`` body."""
+    d = book.bids if side == BID else book.asks
+    rev = side == BID
+    return sorted(d.items(), key=lambda kv: kv[0], reverse=rev)
+
+
+@pytest.mark.parametrize("seed", [20251020, *range(30)])
+def test_price_level_book_sorted_aggregate_matches_full_scan_property(seed):
+    """``PriceLevelBook.levels`` off the maintained SortedDict must equal a from-scratch full sort
+    after EVERY mutation. Randomized ``set`` (incl. qty 0 removal, re-set of an existing price,
+    set of a never-seen price) + occasional ``clear`` over both sides, checking ``levels(side)``,
+    top-n slices, and ``best_bid``/``best_ask`` against the reference at every step."""
+    import random
+
+    from kbtc.recorders.base import PriceLevelBook
+
+    rng = random.Random(seed)
+    b = PriceLevelBook()
+    prices = [Decimal(p) for p in ("99.0", "99.5", "100.0", "100.5", "101.0", "102.0")]
+
+    def check():
+        for side in (BID, ASK):
+            full = _price_book_full_scan_levels(b, side)
+            assert b.levels(side) == full
+            for n in (0, 1, 2, 3, 10):
+                assert b.levels(side, n) == full[:n]
+            best = full[0][0] if full else None
+            got = b.best_bid() if side == BID else b.best_ask()
+            assert got == best
+
+    steps = 600
+    for step in range(steps):
+        op = rng.random()
+        if op < 0.85:  # set a level (qty 0 ⇒ remove; may re-set an existing or a new price)
+            side = rng.choice([BID, ASK])
+            price = rng.choice(prices)
+            qty = rng.choice(["0", "0.5", "1.0", "2.5", "10"])  # mix of removals and sets
+            b.set(side, price, qty)
+        else:  # occasional full clear
+            b.clear()
+        check()
+    assert step == steps - 1
+
+
 def test_normalize_side():
     assert normalize_side("buy") == BID and normalize_side("sell") == ASK
     assert normalize_side(0) == BID and normalize_side(1) == ASK

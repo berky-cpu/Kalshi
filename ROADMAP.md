@@ -204,6 +204,11 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   aggregate (SortedDict); top-N is now O(n), ~396× faster (≈9 s/hr vs ≈60 min/hr, synthetic). `self.orders`
   stays authoritative so Kraken CRC/time-priority is byte-identical. Review
   [REV-013](notes/reviews/REV-013-normalizer-levels-perf.md) (PASS). New dep `sortedcontainers`.
+  *Extended to `PriceLevelBook` 2026-10-20 (REV-024):* the same `levels()` O(N·M) fix was missing on
+  `PriceLevelBook` (Coinbase level2) — it `sorted()`-ed all ~40k levels per event, which stalled the first
+  3-constituent 2.2 study's Coinbase normalize (100% CPU, ~0.3 MB/min). Fixed with the same SortedDict
+  aggregate (~6887× on a 40k-level book); top-of-book byte-identical to before.
+  [REV-024](notes/reviews/REV-024-pricelevelbook-levels-perf.md) (PASS). **361 tests.**
   *Real-data validation 2026-10-17:* a bounded 1 h slice normalized in 2.86 s / 174 MB on the box with
   **Kraken 4080/4080 CRC checkpoints MATCH** (venue-anchored, non-circular) → L3→L2 reconstruction correct
   on live data; valid books+settlements parquet produced.
