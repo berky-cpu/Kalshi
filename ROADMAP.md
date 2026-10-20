@@ -162,6 +162,13 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   checker-self-page applied). **323 tests.** The 06:34 incident class is now defended three ways: won't
   restart → self-heals if it does → alerting backstop. (Not covered: total box death — an external
   dead-man's-switch is the complement, deferred.)
+  *Monitoring perf fix 2026-10-20:* at 5.6 GB the health report scanned the whole tree (`data_time_bounds`
+  decompressed every record to find max-ts) → minutes/run, and `kbtc-status` under `watch -n 30` stacked 6
+  concurrent scans and pinned the box (looked "unhealthy"; feeds were fine). Fixed: health bounds now read
+  ~1 file/feed (window-bounded, metrics byte-identical — the gap/CRC validator is unchanged), and
+  `kbtc-status` uses a fast DATA-age table (`liveness --print-status`, one newest file/feed, never POSTs)
+  instead of the full replay → completes in seconds, can't stack. Review
+  [REV-023](notes/reviews/REV-023-health-dashboard-perf.md) (PASS, speed-only). **330 tests.**
   *EU perp box added 2026-10-17* — a Hetzner CX22 (EU, x86_64) because Binance (HTTP 451) and Bybit
   (HTTP 403) **geo-block the US Ashburn IP** (verified). **Live & recording 24/7:** `binance-perp`
   (depthUpdate + persisted REST snapshot → complete books) and `bybit-perp` (orderbook.50 snapshot+delta),

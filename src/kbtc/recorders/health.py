@@ -484,21 +484,84 @@ def _day_key(ts_ns: int) -> str:
     return datetime.fromtimestamp(ts_ns // NS_PER_S, UTC).strftime("%Y-%m-%d")
 
 
-def data_time_bounds(root: str | Path) -> tuple[int, int] | None:
-    """Scan every feed and return ``(min_ts_ns, max_ts_ns + 1)`` across all records, or None."""
+def _feed_channel_dirs(root: Path):
+    """Yield ``(venue, channel, channel_dir)`` for streaming feeds (batch datasets excluded)."""
+    for venue, channel in discover_feeds(root):
+        if is_batch_dataset(venue, channel):
+            continue  # batch datasets must not stretch the auto-window (they are not feeds)
+        yield venue, channel, root / venue / channel
+
+
+def _sorted_feed_files(channel_dir: Path) -> list[Path]:
+    """A feed's files oldest→newest. Names ``date=YYYY-MM-DD/HH_<ns>.jsonl.zst`` are zero-padded and
+    ns-suffixed, so a lexical sort of ``(date-dir, filename)`` is chronological."""
+    return sorted(channel_dir.glob("date=*/*.jsonl.zst"),
+                  key=lambda p: (p.parent.name, p.name))
+
+
+def _ts_bounds_in_file(path: Path) -> tuple[int | None, int | None]:
+    """``(min_ts, max_ts)`` of ``recv_ts_ns`` in one file (records are append-ordered, so the first
+    non-None is the min and the last is the max)."""
+    mn: int | None = None
+    mx: int | None = None
+    for rec in read_records(path):
+        ts = rec.get("recv_ts_ns")
+        if ts is None:
+            continue
+        if mn is None:
+            mn = ts
+        mx = ts
+    return mn, mx
+
+
+def earliest_data_ns(root: str | Path) -> int | None:
+    """Earliest ``recv_ts_ns`` across streaming feeds, reading only each feed's OLDEST file(s).
+
+    NOTE: these are RECORD-ts bounds over ANY frame (heartbeats included), NOT DATA-frame bounds —
+    they bound the health *window* (the whole recording), matching the old ``data_time_bounds``
+    semantics. (Liveness's DATA-age is the separate, data-classified signal.)
+
+    PERF (FIX A): this used to decompress EVERY file under ``root`` (minutes on a multi-GB tree).
+    The earliest record is in a feed's earliest file, so we read oldest-first and stop at the first
+    file that has data — ~1 file per feed instead of the whole history.
+    """
     root = Path(root)
     lo: int | None = None
+    for _v, _c, d in _feed_channel_dirs(root):
+        for f in _sorted_feed_files(d):
+            mn, _mx = _ts_bounds_in_file(f)
+            if mn is not None:
+                lo = mn if lo is None or mn < lo else lo
+                break
+    return lo
+
+
+def latest_data_ns(root: str | Path) -> int | None:
+    """Latest ``recv_ts_ns`` across streaming feeds, reading only each feed's NEWEST file(s).
+
+    PERF (FIX A): the latest record is in a feed's newest file, so we read newest-first and stop at
+    the first file that has data — ~1 file per feed instead of the whole history. This is the bound
+    the health unit needs (it passes ``--start`` but no ``--end``), and the reason a windowed health
+    report no longer rescans the entire 5.6 GB tree.
+    """
+    root = Path(root)
     hi: int | None = None
-    for f in root.glob("*/*/date=*/*.jsonl.zst"):
-        parts = f.relative_to(root).parts
-        if len(parts) >= 2 and is_batch_dataset(parts[0], parts[1]):
-            continue  # batch datasets must not stretch the auto-window (they are not feeds)
-        for rec in read_records(f):
-            ts = rec.get("recv_ts_ns")
-            if ts is None:
-                continue
-            lo = ts if lo is None or ts < lo else lo
-            hi = ts if hi is None or ts > hi else hi
+    for _v, _c, d in _feed_channel_dirs(root):
+        for f in reversed(_sorted_feed_files(d)):
+            _mn, mx = _ts_bounds_in_file(f)
+            if mx is not None:
+                hi = mx if hi is None or mx > hi else hi
+                break
+    return hi
+
+
+def data_time_bounds(root: str | Path) -> tuple[int, int] | None:
+    """``(min_ts_ns, max_ts_ns + 1)`` across streaming feeds, or ``None`` if there is no data.
+
+    Now reads only the oldest + newest file per feed (FIX A), not the whole tree.
+    """
+    lo = earliest_data_ns(root)
+    hi = latest_data_ns(root)
     if lo is None or hi is None:
         return None
     return lo, hi + 1
@@ -681,15 +744,14 @@ def compute_health(root: str | Path, start_ns: int | None = None, end_ns: int | 
     If ``start_ns``/``end_ns`` are omitted they default to the min/max ``recv_ts_ns`` in the data.
     """
     root = Path(root)
-    if start_ns is None or end_ns is None:
-        bounds = data_time_bounds(root)
-        if bounds is None:
-            start_ns = start_ns if start_ns is not None else 0
-            end_ns = end_ns if end_ns is not None else (start_ns + 1)
-        else:
-            lo, hi = bounds
-            start_ns = start_ns if start_ns is not None else lo
-            end_ns = end_ns if end_ns is not None else hi
+    # Resolve only the MISSING bound, each from the oldest/newest file per feed (FIX A) — never a
+    # full-tree scan. The health unit passes --start but no --end, so only ``latest_data_ns`` runs.
+    if start_ns is None:
+        lo = earliest_data_ns(root)
+        start_ns = lo if lo is not None else 0
+    if end_ns is None:
+        hi = latest_data_ns(root)
+        end_ns = (hi + 1) if hi is not None else (start_ns + 1)
     # Streaming feeds only: batch (non-streaming) datasets such as kalshi/settlement are excluded
     # here (not in discover_feeds, which the normalizer reuses and must see) — see is_batch_dataset.
     feeds = [
