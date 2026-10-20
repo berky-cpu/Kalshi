@@ -13,12 +13,13 @@ VENV="/opt/kbtc/.venv/bin/python"
 echo "== kbtc recorders @ $(hostname) == $(date -u '+%Y-%m-%d %H:%M:%SZ') =="
 echo
 
-# Per-feed health over a rolling 5-minute window (HEALTHY / msgs-s / seq-gaps / gap-time).
-# NOTE: the health CLI exits non-zero when ANY feed is flagged unhealthy, so we key the
-# "unavailable" message on EMPTY output, not on the exit code (a flagged feed still prints a table).
-start="$(date -u -d '-5 min' '+%Y-%m-%dT%H:%M:%SZ')"
-health_out="$(sudo -u kbtc "$VENV" -m kbtc.recorders.health --root "$ROOT" --start "$start" 2>/dev/null)"
-if [ -n "$health_out" ]; then echo "$health_out"; else echo "(health report unavailable)"; fi
+# Per-feed liveness: newest-DATA-frame age + recent msgs/s (FAST — reads ONE newest file per feed,
+# a few seconds regardless of total data size, so `watch -n 30` can't stack). DATA-age (not file
+# mtime) so a heartbeat-only stall shows STALE. The full gap/CRC health report is expensive and is
+# NOT run every tick; run it on demand (now windowed/fast too):
+#   sudo -u kbtc $VENV -m kbtc.recorders.health --root $ROOT --start "$(date -u -d '-15 min' +%Y-%m-%dT%H:%M:%SZ)"
+status_out="$(sudo -u kbtc "$VENV" -m kbtc.recorders.liveness --root "$ROOT" --print-status 2>/dev/null)"
+if [ -n "$status_out" ]; then echo "$status_out"; else echo "(feed status unavailable)"; fi
 echo
 
 # Raw data on disk: total + per venue/channel with newest-write age (is it still being written NOW?).

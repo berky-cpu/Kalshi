@@ -138,6 +138,48 @@ def test_main_alerts_only_stale_feeds(tmp_path):
 
 
 # --------------------------------------------------------------------------------------
+# FIX B — fast dashboard status (data-age + recent msgs/s), no alerts.
+# --------------------------------------------------------------------------------------
+def test_feed_status_data_age_and_rate(tmp_path):
+    root = tmp_path / "raw"
+    # 10 data frames at 1/s ending 3 s ago, then a heartbeat 1 s ago (must not reset data-age).
+    frames = [(CB_DATA, NOW - (12 - k) * S) for k in range(10)]  # NOW-12s .. NOW-3s
+    frames.append((CB_HEARTBEAT, NOW - 1 * S))
+    _write(root, "coinbase", "full", frames)
+    st = liveness.feed_status("coinbase", "full", root / "coinbase" / "full", NOW)
+    assert st is not None
+    assert st.last_data_ns == NOW - 3 * S          # newest DATA frame (heartbeat ignored)
+    assert abs(st.age_s - 3.0) < 0.01
+    assert st.data_per_s > 0.5                      # ~1/s over the trailing window
+    assert st.stale is False
+
+
+def test_scan_status_marks_stale_and_batch(tmp_path):
+    root = tmp_path / "raw"
+    _write(root, "coinbase", "full", [(CB_DATA, NOW - 300 * S)])       # stale (>180)
+    _write(root, "kraken", "level3", [(KR_DATA, NOW - 5 * S)])         # live
+    _write(root, "kalshi", "settlement", [(CB_DATA, NOW - 99_999 * S)])  # batch (no verdict)
+    by = {s.feed: s for s in liveness.scan_status(root, NOW)}
+    assert by["coinbase/full"].stale is True
+    assert by["kraken/level3"].stale is False
+    assert by["kalshi/settlement"].threshold_s is None and by["kalshi/settlement"].stale is False
+    table = liveness.render_status(list(by.values()), NOW)
+    assert "STALE" in table and "coinbase/full" in table and "batch" in table
+
+
+def test_print_status_mode_never_alerts(tmp_path, capsys):
+    root = tmp_path / "raw"
+    _write(root, "coinbase", "full", [(CB_DATA, NOW - 300 * S)])  # stale — but dashboard must NOT page
+    calls: list[tuple[str, str]] = []
+    rc = liveness.main(["--root", str(root), "--print-status"], clock_ns=lambda: NOW,
+                       notifier=lambda s, b: calls.append((s, b)))
+    assert rc == 0
+    assert calls == []                      # dashboard mode never notifies
+    out = capsys.readouterr().out
+    assert "coinbase/full" in out and "STALE" in out
+
+
+# --------------------------------------------------------------------------------------
 # alert.sh: no-op when KBTC_ALERT_URL is unset; never echoes the URL.
 # --------------------------------------------------------------------------------------
 def test_alert_sh_noops_when_url_unset():

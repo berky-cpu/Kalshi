@@ -59,6 +59,89 @@ def _coinbase_open(seq: int, oid: str) -> str:
 
 
 # --------------------------------------------------------------------------------------
+# FIX A — windowed reads: a narrow window must NOT rescan the whole multi-day tree.
+# --------------------------------------------------------------------------------------
+def _write_feed(root, venue, channel, frames):
+    w = RotatingZstdWriter(root, venue, channel)
+    for raw, ts in frames:
+        w.write(raw, recv_ts_ns=ts)
+    w.close()
+
+
+def _multi_day_coinbase(tmp_path):
+    """A coinbase feed spanning 3 days, one file per day (a 5 s, 1 msg/s burst each)."""
+    root = tmp_path / "raw"
+    day = 24 * HOUR
+    seq = 100
+    for base in (T0 - 2 * day, T0 - day, T0):  # oldest → newest
+        frames = []
+        for k in range(5):
+            seq += 1
+            frames.append((_coinbase_open(seq, f"o{seq}"), base + k * NS))
+        _write_feed(root, "coinbase", "full", frames)  # one writer → one file for the day
+    return root
+
+
+def _spy_reads(monkeypatch):
+    """Patch health.read_records to record which file paths get decompressed; returns the list."""
+    import kbtc.recorders.health as H
+    reads: list[str] = []
+    orig = H.read_records
+
+    def spy(path):
+        reads.append(str(path))
+        yield from orig(path)
+
+    monkeypatch.setattr(H, "read_records", spy)
+    return reads
+
+
+def test_feed_files_windows_to_overlapping_only(tmp_path):
+    from kbtc.recorders.health import feed_files
+    root = _multi_day_coinbase(tmp_path)
+    # A 4-minute window around T0 selects only the file(s) in T0's hour, not all 3 days.
+    win = feed_files(root, "coinbase", "full", T0 - 2 * 60 * NS, T0 + 2 * 60 * NS)
+    assert len(win) == 1
+    # A wide window sees all three days' files.
+    assert len(feed_files(root, "coinbase", "full", 0, 10**30)) == 3
+
+
+def test_latest_and_earliest_read_one_file_per_feed(tmp_path, monkeypatch):
+    import kbtc.recorders.health as H
+    root = _multi_day_coinbase(tmp_path)
+    reads = _spy_reads(monkeypatch)
+    # latest_data_ns reads only the NEWEST file (not all 3 days).
+    reads.clear()
+    assert H.latest_data_ns(root) == T0 + 4 * NS
+    assert len(reads) == 1, reads
+    # earliest_data_ns reads only the OLDEST file.
+    reads.clear()
+    assert H.earliest_data_ns(root) == T0 - 2 * 24 * HOUR
+    assert len(reads) == 1, reads
+
+
+def test_windowed_health_does_not_rescan_whole_tree(tmp_path, monkeypatch):
+    import kbtc.recorders.health as H
+    root = _multi_day_coinbase(tmp_path)
+    reads = _spy_reads(monkeypatch)
+    # Health with an explicit --start (no --end), like the systemd unit: resolves the end bound from
+    # the newest file only, then reads just the windowed file(s) — far fewer than the 3-day tree.
+    rep = H.compute_health(root, start_ns=T0 - 2 * 60 * NS, max_quiet_s=2.0, min_rate=0.0)
+    assert rep.feeds and rep.feeds[0].healthy  # the "now" burst is covered
+    assert len(reads) <= 2, reads  # newest-file (end bound) + the single windowed file
+
+
+def test_windowed_metrics_match_full_window_scan(tmp_path):
+    import kbtc.recorders.health as H
+    root = _multi_day_coinbase(tmp_path)
+    # The windowed read and an explicit tight window give the same per-feed metrics for the burst.
+    windowed = H.compute_feed_health(root, "coinbase", "full",
+                                     T0 - 2 * 60 * NS, T0 + 2 * 60 * NS, max_quiet_s=2.0,
+                                     min_rate=0.0)
+    assert windowed.n_messages == 5  # only the "now" burst, none of the older days
+
+
+# --------------------------------------------------------------------------------------
 # Discovery + processor mapping.
 # --------------------------------------------------------------------------------------
 def test_discover_feeds():
