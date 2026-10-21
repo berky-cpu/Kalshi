@@ -305,6 +305,19 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   **Follow-ups:** (a) fix the Bitstamp L3→L2 crossed book (Coinbase-severity data bug — IN PROGRESS); (b)
   deploy the PriceLevelBook perf fix (REV-024) → re-normalize Coinbase (fast) → re-run as a full
   3-constituent study; (c) accumulate more days (larger n, full test day).
+  **Full 3-constituent result 2026-10-21 — [EXP-002](notes/experiments/EXP-002-brti-tracking-3of3.md),
+  red-team VALID ([REV-027](notes/reviews/REV-027-exp002-tracking-3of3.md)):** Bitstamp crossed-book bug
+  fixed (a40b452 / [REV-026](notes/reviews/REV-026-bitstamp-reseed-resurrection.md); crossing 62.9%→10.3%
+  on re-normalized data, Bitstamp usable ~37%→~90%). Walk-forward TRAIN {10-18,10-19} n=112 / held-out
+  TEST 10-20 n=80 (all 3 venues): **median $2.69 / p95 $7.02 / max $9.32 / bias −$1.29** at `T-60..T-1` —
+  **still MISSES p95<$5**, improved on every metric vs EXP-001 (p95 $8.997→$7.02, n 30→80). Red-team
+  confirmed the −$1.29 bias is NOT a defect (conservative-direction construction lag + missing venues;
+  replica undershoots/compresses extremes, bias scales with vol — opposite of leakage). Caveats: config
+  grid O-4/O-9 **empirically inert even at 3 venues** (§5.3 deviation filter 0/14,460 → re-tuning won't
+  help); TEST is a single autocorrelated day (n=80 ≈ 1 independent sample — treat as a point estimate).
+  **Still not ticked.** Path to p95<$5 (per REV-027): (1) add constituents — Gemini first (IN PROGRESS);
+  (2) root-cause the high-vol construction lag ([EXP-003](notes/experiments/EXP-003-lag-bias-diagnostic.md)
+  diagnostic, IN PROGRESS); (3) accumulate ≥3–5 independent held-out days for a credible p95/CI.
 - [ ] **2.3** Lead–lag study: perp flow vs. replica (Hayashi–Yoshida). Report horizons.
 
 ## Phase 3 — Fair value + signals (owner: quant-modeler)
