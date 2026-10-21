@@ -50,7 +50,7 @@ import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from . import binance, bitstamp, bybit, coinbase, coinbase_advanced, kalshi, kraken
+from . import binance, bitstamp, bybit, coinbase, coinbase_advanced, gemini, kalshi, kraken
 from .base import MessageProcessor, logger, now_ns
 
 JsonFetch = Callable[[str], Awaitable[Any]]
@@ -298,6 +298,17 @@ def coinbase_advanced_resync_builder(
 ) -> Callable[[WsSend], Resnapshot]:
     """In-band: resubscribe to ``level2`` → a fresh ``snapshot`` rebuilds the book (no REST fetch)."""
     frames = coinbase_advanced.resubscribe_messages(product)
+    return lambda send: ResubscribeResyncer(frames, send)
+
+
+def gemini_resync_builder(
+    product: str = "BTCUSD",
+) -> Callable[[WsSend], Resnapshot]:
+    """In-band (like Bybit / Coinbase-Advanced): resubscribe to ``l2`` → a fresh snapshot rebuilds
+    the book (no REST fetch). ``resync_on_connect`` is False — the initial ``subscribe`` already
+    yields the reseed snapshot, and a mid-stream snapshot resets the book via the processor's own
+    ``trades``/``auction_events`` signature (so a reconnect reseeds without an extra resubscribe)."""
+    frames = gemini.resubscribe_messages(product)
     return lambda send: ResubscribeResyncer(frames, send)
 
 
