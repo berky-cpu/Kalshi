@@ -315,9 +315,15 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   replica undershoots/compresses extremes, bias scales with vol — opposite of leakage). Caveats: config
   grid O-4/O-9 **empirically inert even at 3 venues** (§5.3 deviation filter 0/14,460 → re-tuning won't
   help); TEST is a single autocorrelated day (n=80 ≈ 1 independent sample — treat as a point estimate).
-  **Still not ticked.** Path to p95<$5 (per REV-027): (1) add constituents — Gemini first (IN PROGRESS);
-  (2) root-cause the high-vol construction lag ([EXP-003](notes/experiments/EXP-003-lag-bias-diagnostic.md)
-  diagnostic, IN PROGRESS); (3) accumulate ≥3–5 independent held-out days for a credible p95/CI.
+  **Still not ticked.** Diagnostic [EXP-003](notes/experiments/EXP-003-lag-bias-diagnostic.md) then
+  REFUTED the forward-fill-lag hypothesis: books are already fresh (median age 0.02–0.10 s, 10 s gate
+  almost never fires), staleness is anti-correlated with vol (−0.58), the direct lag test has the wrong
+  sign (`corr(err,drift)=+0.30` → replica leads *into* the move, opposite of lag), and 10 s→1 s cutoff
+  does nothing. Much of EXP-002's h=15/high-vol concentration does NOT reproduce on TRAIN (bias −$0.34,
+  non-monotone) → largely a single-day (10-20) artifact. **Revised path to p95<$5:** (1) add constituents
+  — Gemini first (IN PROGRESS); (2) investigate the sub-second averaging-window **endpoint alignment**
+  (the +0.30 err-vs-drift slope; O-5/O-6 + the "1 Hz vs 200 ms BRTI feed" PARTIAL in facts.md) — NOT a
+  staleness/latency fix (dead end); (3) accumulate ≥3–5 independent held-out days for a credible p95/CI.
 - [ ] **2.3** Lead–lag study: perp flow vs. replica (Hayashi–Yoshida). Report horizons.
 
 ## Phase 3 — Fair value + signals (owner: quant-modeler)
