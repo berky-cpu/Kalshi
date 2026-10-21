@@ -65,6 +65,15 @@ def _is_recorded_complete_snapshot(venue: str, msg: Any) -> bool:
         # v2 l2 has no ``type:"snapshot"`` marker; the snapshot is the ONLY ``l2_updates`` that also
         # carries ``trades``/``auction_events`` (VERIFIED on the wire). Mirrors the processor.
         return msg.get("type") == "l2_updates" and ("trades" in msg or "auction_events" in msg)
+    if v == "cryptocom":
+        # A book SNAPSHOT is a ``book`` frame whose ``data[0]`` has top-level ``asks``/``bids`` and
+        # NO ``update`` object (a DELTA has ``update``). Mirrors the processor. (VERIFIED on wire.)
+        res = msg.get("result")
+        if not isinstance(res, dict) or not str(res.get("channel", "")).startswith("book"):
+            return False
+        data = res.get("data") or []
+        d0 = data[0] if data and isinstance(data[0], dict) else {}
+        return ("asks" in d0 or "bids" in d0) and "update" not in d0
     return False
 
 

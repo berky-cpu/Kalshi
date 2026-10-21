@@ -80,6 +80,7 @@ CRC32 checksum (incl. worked example `1063832831`), and Binance `pu` rules again
 | Binance USDⓈ-M `@depth`+`@aggTrade` | lead signal | `wss://fstream.binance.com` | public | **`pu`** (`pu == prev.u`; ≠ spot's `U==prev.u+1`) | VERIFIED resync/`pu` (speeds/trades/limits PARTIAL) |
 | Bybit v5 linear `orderbook`+`publicTrade` | lead signal | `wss://stream.bybit.com/v5/public/linear` | public | **`type=="snapshot"`** reset (no numeric `u`-gap rule) | VERIFIED incl. trades |
 | Gemini v2 `marketdata` `l2` (BTCUSD) | constituent | `wss://api.gemini.com/v2/marketdata` | **public (no auth)** | **NONE — no sequence number exists**; best-effort **crossed-book** (`bid>ask`) detector + reconnect-reseed | VERIFIED 2026-10-21 (doc, *Archived* but endpoint LIVE) + 2026-10-20 (live wire); crossed-book detector PARTIAL (see note) |
+| Crypto.com Exchange v1 `book` (BTC_USD spot) | constituent | `wss://stream.crypto.com/exchange/v1/market` | **public (no auth)** | **`pu`** (`pu == prev.u` delta chain; SNAPSHOT anchors `u`) + in-band resubscribe resync | VERIFIED 2026-10-21 (primary doc) + live wire BOTH boxes; `cs` checksum present-but-unused (F-12), limits PARTIAL |
 | Kalshi `orderbook_delta`/`trade`/lifecycle | **trading venue** | `wss://external-api-ws.kalshi.com/trade-api/ws/v2` (legacy `api.elections.kalshi.com`; demo `external-api-ws.demo.kalshi.co`) — all VERIFIED | API key + RSA-PSS/Ed25519 sig over `ts+"GET"+"/trade-api/ws/v2"`, headers `KALSHI-ACCESS-KEY/SIGNATURE/TIMESTAMP` (ms) — READS ONLY, VERIFIED | **orderbook SCHEMA now VERIFIED** (2026-10-17): envelope `type`/`sid`/`seq`; snapshot `yes_dollars_fp`/`no_dollars_fp` (optional `[price_dollars,count_fp]` string pairs); delta `price_dollars`+SIGNED `delta_fp`+`side` yes/no. **LIVE-WIRE CONFIRMED 2026-10-17** (authed capture, KXBTC15M-26OCT172000-00): payload IS NESTED under `msg` (the doc example was flattened); `sid` per-subscription, `seq` per-sid and **RESETS to 1 on each reconnect** (handled — each `orderbook_snapshot` re-anchors `_seq_by_sid`). Real snapshot = 40k-ish levels, dollar-string prices ("0.0010") + fixed-point sizes ("1226720.00"); delta `delta_fp="-100.00"` signed. **unsubscribe-via-`sids` still INFERRED (code marks it UNVERIFIED).** **`trade` SCHEMA now VERIFIED (live wire 2026-10-17)**: nested under `msg` = `trade_id`(UUID), `market_ticker`, `yes_price_dollars`/`no_price_dollars` (DOLLAR strings, complements), `count_fp` (fixed-point size), `taker_side`/`taker_outcome_side` (yes/no), `taker_book_side` (bid/ask), `is_block_trade`, `ts`(s)/`ts_ms`(ms) — NOT the old `yes_price` cents-int. Normalizer emits price=`yes_price_dollars`, size=`count_fp`, side=`taker_side`, exch_ts from `ts_ms`. | **orderbook + trade schemas VERIFIED (doc + live wire 2026-10-17)**; `msg`-wrapper CONFIRMED nested, seq per-sid + resets-to-1-on-reconnect CONFIRMED (handled). **CORRECTION:** the earlier "no-keepalive, drops ~every 4 s" note was WRONG — the ~4 s reconnect was the OLD adapter raising `KeyError: 'price'` on every delta (run_recorder reconnects on any `process()` exception); with the verified-schema adapter the connection is STABLE (10,113 frames / 22 s, 0 crashes, single connection; raw WS also stable with/without ping per a 40 s / 27k-frame probe) — no keepalive needed. unsubscribe-`sids` stays INFERRED. **1.3 deploy follow-up (NOT a 1.1b schema item):** continuous 24/7 capture needs DYNAMIC ticker management — KXBTC15M rolls a new market every 15 min, so static `KBTC_KALSHI_TICKERS` only covers one window. |
 
 ### Feed verification notes
@@ -133,6 +134,38 @@ CRC32 checksum (incl. worked example `1063832831`), and Binance `pu` rules again
   (c) whether the crossed-book heuristic ever false-positives on a transient (believed no — the venue never
   rests a bid above an ask; a one-shot guard prevents any gap storm regardless). Probe was LOCAL read-only
   (connect→subscribe→~40 frames→disconnect), NOT run on the box.
+- **Crypto.com Exchange v1 `book` VERIFIED 2026-10-21** (primary doc) **+ live wire 2026-10-21, both
+  boxes** (BRTI constituent; new in the 1.1-series). **Source doc:** the v1 `book.{instrument_name}.{depth}`
+  channel page `https://exchange-developer.crypto.com/exchange/v1/docs/api/websocket/ws-channel-book-instrument-name-depth`
+  (the old `https://exchange-docs.crypto.com/exchange/v1/rest-ws/index.html` 301-redirects here; the
+  site is a Docusaurus SPA that resisted WebFetch/curl on the root, but the per-channel pages served
+  clean SSG HTML to `curl` — read via tag-strip). Level format `[Price, Quantity, NumOrders]` from the
+  REST `public-get-book` page; the spot instrument `BTC_USD` confirmed from the public `get-instruments`
+  REST read (`inst_type` `CCY_PAIR`; `BTCUSD-PERP` is the perpetual — NOT what we record). Endpoint
+  `wss://stream.crypto.com/exchange/v1/market`, **public, no auth**. Subscribe ONE frame
+  `{"id":1,"method":"subscribe","params":{"channels":["book.BTC_USD.50"],"book_subscription_type":"SNAPSHOT_AND_UPDATE","book_update_frequency":100},"nonce":<ms>}`
+  (depth 50 = venue max; explicit depth now REQUIRED; `SNAPSHOT_AND_UPDATE` = 100 ms delta mode, the
+  full-snapshot-only feed was retired 2025-02). Book data rides in `result` (`result.channel` starts
+  `book`); `result.data[0]` is a SNAPSHOT (top-level `asks`/`bids` full book, `u`, `t`/`tt`, `cs`; NO
+  `pu`) or a DELTA (`update` object with changed `asks`/`bids`, `u`, `pu`). `quantity` is the FULL
+  (absolute SET) size; `"0"` removes the level. **GAP DETECTION — the real documented mechanism (NOT
+  invented):** deltas apply in strict order where **`pu` of the new message == `u` of the previous
+  message** (Binance-futures-style chain); the snapshot anchors `last_u`; a `pu` mismatch is a dropped
+  message → log the gap + in-band resync (resubscribe → fresh snapshot). **VERIFIED on the live wire:
+  37/37 (Ashburn-US) and 38/38 (EU-DE) consecutive `pu == prev.u` checks held, full snapshot then
+  deltas, subscribe ack `code:0`.** **HEARTBEAT:** the server sends `public/heartbeat` ~every 30 s and
+  the client MUST reply `public/respond-heartbeat` (echoing the id) within 5 s or it disconnects
+  (doc-VERIFIED; a heartbeat was seen on the wire and answered). Implemented via a new general,
+  backward-compatible seam: the pure processor queues the reply on `self.outbound`, `run_recorder`
+  drains + sends it over the live socket right after `process` (empty for every other venue). **GEO
+  (VERIFIED 2026-10-21):** market-data WS reachable from BOTH boxes (Ashburn US + EU DE) — NOT
+  geo-restricted; **deploys to the Ashburn (US) box** with the other constituents. L2 price-level book
+  (`PriceLevelBook`). Writer path `cryptocom/book_btcusd`, feed `cryptocom-book`, `required_env=()`.
+  **PARTIAL/UNVERIFIED:** (a) the `cs` book-checksum algorithm is not on the current doc page — present
+  on the wire but UNUSED and not invented (F-12); (b) connection / message-rate limits not recorded;
+  (c) 30 s heartbeat cadence is doc-stated, observed once in the short probe. Probe was read-only
+  (connect→subscribe→~40 frames→respond-heartbeat→disconnect), run on both VPS boxes, nothing left
+  running.
 - **Bitstamp VERIFIED 2026-10-16** (Berk fetched the primary WS doc): endpoint `wss://ws.bitstamp.net`,
   subscribe envelope `{"event":"bts:subscribe","data":{"channel":"live_orders_<market>"}}`, ≤1024 channels/conn.
   **Gap mechanism corrected:** `live_orders` events carry top-level **`event_id`/`pre_event_id`** ("allow you to

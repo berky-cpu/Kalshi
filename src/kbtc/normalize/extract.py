@@ -98,6 +98,15 @@ def exch_ts_ns(venue: str, msg: Any) -> int | None:
         # Advanced Trade l2_data envelope carries a top-level RFC3339 ``timestamp``.
         t = msg.get("timestamp")
         return _iso_ns(t) if isinstance(t, str) else None
+    if v == "cryptocom":
+        # book frame: ``result.data[0].t`` is the event time in ms (snapshot and delta both carry
+        # it, VERIFIED on the wire).
+        res = msg.get("result")
+        data = res.get("data") if isinstance(res, dict) else None
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            t = data[0].get("t")
+            return int(t) * NS_PER_MS if t is not None else None
+        return None
     if v == "kraken":
         data = msg.get("data") or []
         if data and isinstance(data[0], dict):
