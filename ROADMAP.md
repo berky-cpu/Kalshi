@@ -292,9 +292,19 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   and reports p95 on a **disjoint, date-split TEST set** (hard overlap guard). Coverage (`venues_used`) is
   attached to every headline stat; published values are Decimal end-to-end. Review
   [REV-012](notes/reviews/REV-012-roadmap-2.2-brti-replica.md) (FAIL→PASS). **209 tests pass.**
-  **Not ticked:** the p95<$5 *result* needs real recorded data on a walk-forward split; only 2/7
-  constituents are live (Bitstamp + Kraken) and data is still accumulating. Run the real-data
-  tracking-error study (and the 2/7→full-constituent coverage study) when there is enough data.
+  **First result 2026-10-20 — [EXP-001](notes/experiments/EXP-001-brti-tracking-2of3-firstpass.md),
+  red-team VALID ([REV-025](notes/reviews/REV-025-exp001-tracking-2of3.md)):** a 2-of-3-constituent
+  (Bitstamp+Kraken) walk-forward (TRAIN 10-19 n=22 / held-out TEST 10-20 n=30) gives **median $3.15 / p95
+  $8.997 / max $10.34** at the frozen `T-60..T-1` endpoint — **MISSES p95<$5**, as expected for thin
+  coverage. The miss is NOT a replica/averaging defect: 60×1 s averaging matches the derivation (0/191
+  window violations), §5 filters behave as specified, Kraken reconstruction CRC-clean, replica in
+  believable BTC range. Drivers: (1) only 2 of the ~3 spot constituents (real BRTI uses ~5–6); (2) a
+  **Bitstamp self-crossed-book bug** — Bitstamp present+synced in ~159/191 windows but dropped by §5.2.1(c)
+  in ~107 (persistent best_bid>best_ask) → replica is Kraken-only ~62% of windows. O-4/O-9 inert at 2
+  venues; open≡close (chained markets). **Still not ticked** — the target isn't met and coverage is partial.
+  **Follow-ups:** (a) fix the Bitstamp L3→L2 crossed book (Coinbase-severity data bug — IN PROGRESS); (b)
+  deploy the PriceLevelBook perf fix (REV-024) → re-normalize Coinbase (fast) → re-run as a full
+  3-constituent study; (c) accumulate more days (larger n, full test day).
 - [ ] **2.3** Lead–lag study: perp flow vs. replica (Hayashi–Yoshida). Report horizons.
 
 ## Phase 3 — Fair value + signals (owner: quant-modeler)
