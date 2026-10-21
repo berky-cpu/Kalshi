@@ -74,6 +74,11 @@ def _is_recorded_complete_snapshot(venue: str, msg: Any) -> bool:
         data = res.get("data") or []
         d0 = data[0] if data and isinstance(data[0], dict) else {}
         return ("asks" in d0 or "bids" in d0) and "update" not in d0
+    if v == "bullish":
+        # Every L2 frame is a ``dataType:"V1TALevel2"`` full-book snapshot (``type:"snapshot"``);
+        # the UNVERIFIED ``type:"update"`` incremental is NOT a complete baseline. Mirrors the
+        # processor. (VERIFIED on the wire: BTCUSD L2 emits only snapshots.)
+        return msg.get("dataType") == "V1TALevel2" and msg.get("type") != "update"
     return False
 
 

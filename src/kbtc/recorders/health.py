@@ -80,6 +80,7 @@ from typing import Any
 from .base import MessageProcessor, as_dict
 from .binance import BinanceAggTradeProcessor, BinanceDepthProcessor
 from .bitstamp import BitstampProcessor
+from .bullish import BullishL2Processor
 from .bybit import BybitOrderbookProcessor, BybitPublicTradeProcessor
 from .coinbase import CoinbaseProcessor
 from .coinbase_advanced import CoinbaseAdvancedProcessor
@@ -142,6 +143,8 @@ def make_processor(venue: str, channel: str) -> tuple[MessageProcessor | None, P
         return GeminiL2Processor(channel=channel), None  # in-band l2_updates snapshot (no seq)
     if v == "cryptocom":
         return CryptoComL2Processor(channel=channel), None  # in-band book snapshot; pu-chain gaps
+    if v == "bullish":
+        return BullishL2Processor(channel=channel), None  # in-band full snapshot; seq-range chain gaps
     if v == "coinbase":
         return CoinbaseProcessor(channel=channel), _prime_coinbase
     if v == "kraken":
@@ -244,6 +247,14 @@ def _is_data_cryptocom(raw: Any) -> bool:
             and bool(res.get("data")))
 
 
+def _is_data_bullish(raw: Any) -> bool:
+    # Book frames carry ``dataType:"V1TALevel2"`` (both the ``snapshot`` and the UNVERIFIED
+    # ``update`` type); subscribe acks, keepalive pongs and errors carry ``result``/``error`` and no
+    # ``dataType`` (a heartbeat-/ack-only stream is the failure the watchdog must catch).
+    msg = as_dict(raw)
+    return isinstance(msg, dict) and msg.get("dataType") == "V1TALevel2"
+
+
 def _is_data_bitstamp(raw: Any) -> bool:
     msg = as_dict(raw)
     return (isinstance(msg, dict)
@@ -281,6 +292,7 @@ _DATA_CLASSIFIERS: dict[str, Callable[[Any], bool]] = {
     "coinbase_advanced": _is_data_coinbase_advanced,
     "gemini": _is_data_gemini,
     "cryptocom": _is_data_cryptocom,
+    "bullish": _is_data_bullish,
     "bitstamp": _is_data_bitstamp,
     "binance": _is_data_binance,
     "bybit": _is_data_bybit,

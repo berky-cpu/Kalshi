@@ -50,7 +50,18 @@ import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from . import binance, bitstamp, bybit, coinbase, coinbase_advanced, cryptocom, gemini, kalshi, kraken
+from . import (
+    binance,
+    bitstamp,
+    bullish,
+    bybit,
+    coinbase,
+    coinbase_advanced,
+    cryptocom,
+    gemini,
+    kalshi,
+    kraken,
+)
 from .base import MessageProcessor, logger, now_ns
 
 JsonFetch = Callable[[str], Awaitable[Any]]
@@ -322,6 +333,19 @@ def cryptocom_resync_builder(
     snapshot, and a mid-stream snapshot resets the book via the processor's own structural
     (``update``-absent) discriminator (so a reconnect reseeds without an extra resubscribe)."""
     frames = cryptocom.resubscribe_messages(product, depth)
+    return lambda send: ResubscribeResyncer(frames, send)
+
+
+def bullish_resync_builder(
+    product: str = bullish.SYMBOL,
+) -> Callable[[WsSend], Resnapshot]:
+    """In-band (like Bybit / Coinbase-Advanced / Gemini / Crypto.com): resubscribe to ``l2Orderbook``
+    → Bullish re-pushes a fresh full SNAPSHOT that rebuilds the book (no REST fetch). Only the
+    (UNVERIFIED) update path arms ``needs_resnapshot``; the snapshot path self-heals so it never
+    fires a resync. ``resync_on_connect`` is False — the initial ``subscribe`` already yields the
+    reseed snapshot, and because every data frame is a full snapshot a reconnect reseeds silently via
+    the processor's own snapshot handling (no extra resubscribe)."""
+    frames = bullish.resubscribe_messages(product)
     return lambda send: ResubscribeResyncer(frames, send)
 
 

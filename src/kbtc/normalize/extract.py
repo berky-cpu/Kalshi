@@ -107,6 +107,17 @@ def exch_ts_ns(venue: str, msg: Any) -> int | None:
             t = data[0].get("t")
             return int(t) * NS_PER_MS if t is not None else None
         return None
+    if v == "bullish":
+        # L2 frame: ``data`` (object on the wire, or ``[{...}]`` in the generic-envelope doc form)
+        # carries ``timestamp`` in ms (string). ``datetime`` (ISO) and ``publishedAtTimestamp`` also
+        # present; we use ``timestamp``. (VERIFIED on the wire.)
+        data = msg.get("data")
+        body = data if isinstance(data, dict) else (
+            data[0] if isinstance(data, list) and data and isinstance(data[0], dict) else None)
+        if isinstance(body, dict):
+            t = body.get("timestamp")
+            return int(t) * NS_PER_MS if t is not None else None
+        return None
     if v == "kraken":
         data = msg.get("data") or []
         if data and isinstance(data[0], dict):
