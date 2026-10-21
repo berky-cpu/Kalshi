@@ -466,6 +466,14 @@ class MessageProcessor(ABC):
         # heartbeats/acks/control do NOT count); the data-staleness watchdog reads it. Exposed for
         # observability; the watchdog's own clock is :class:`DataStalenessMonitor`.
         self.last_data_ns: int = 0
+        # Outbound frames the processor wants sent back over THIS connection in direct response to an
+        # inbound frame (e.g. Crypto.com's ``public/respond-heartbeat``, which the server requires
+        # within 5 s or it disconnects — an id-echoing reply that the fixed-cadence ``ping_message``
+        # cannot express). ``run_recorder`` drains this via :meth:`take_outbound` and sends each over
+        # the live socket right after ``process``. Empty for every venue that needs no such reply, so
+        # existing adapters are unaffected. Pure/socket-free: the processor only QUEUES; the IO layer
+        # sends (keeps the processor unit-testable with no socket).
+        self.outbound: list[Any] = []
 
     def _emit_gap(
         self, reason: str, recv_ts_ns: int, expected: Any = None, got: Any = None
@@ -487,6 +495,17 @@ class MessageProcessor(ABC):
 
     def clear_resnapshot(self) -> None:
         self.needs_resnapshot = False
+
+    def take_outbound(self) -> list[Any]:
+        """Return and clear any frames the processor queued to send back (see ``self.outbound``).
+
+        Called by ``run_recorder`` right after ``process`` so an id-echoing reply (e.g. Crypto.com's
+        ``public/respond-heartbeat``) is sent over the live socket with ~ms latency. Returns an empty
+        list for every venue that queues nothing.
+        """
+        out = self.outbound
+        self.outbound = []
+        return out
 
     def begin_resync(self) -> None:
         """Enter resync mode before a fresh snapshot is applied.
@@ -707,6 +726,10 @@ async def run_recorder(  # pragma: no cover - requires a live socket
                                 p.last_data_ns = recv
                         for p in procs:
                             p.process(raw, recv)
+                            # Send any direct reply the processor queued (e.g. Crypto.com's
+                            # ``public/respond-heartbeat``) over THIS socket, before resync handling.
+                            for frame in p.take_outbound():
+                                await _send(frame if isinstance(frame, str) else json.dumps(frame))
                             if p.needs_resnapshot:
                                 p.clear_resnapshot()
                                 await resnapshot(p)

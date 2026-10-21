@@ -83,6 +83,7 @@ from .bitstamp import BitstampProcessor
 from .bybit import BybitOrderbookProcessor, BybitPublicTradeProcessor
 from .coinbase import CoinbaseProcessor
 from .coinbase_advanced import CoinbaseAdvancedProcessor
+from .cryptocom import CryptoComL2Processor
 from .gemini import GeminiL2Processor
 from .kalshi import KalshiProcessor
 from .kraken import KrakenProcessor
@@ -139,6 +140,8 @@ def make_processor(venue: str, channel: str) -> tuple[MessageProcessor | None, P
         return CoinbaseAdvancedProcessor(channel=channel), None  # in-band l2_data snapshot
     if v == "gemini":
         return GeminiL2Processor(channel=channel), None  # in-band l2_updates snapshot (no seq)
+    if v == "cryptocom":
+        return CryptoComL2Processor(channel=channel), None  # in-band book snapshot; pu-chain gaps
     if v == "coinbase":
         return CoinbaseProcessor(channel=channel), _prime_coinbase
     if v == "kraken":
@@ -228,6 +231,19 @@ def _is_data_gemini(raw: Any) -> bool:
     return isinstance(msg, dict) and msg.get("type") in {"l2_updates", "trade"}
 
 
+def _is_data_cryptocom(raw: Any) -> bool:
+    # Book frames carry ``result`` with ``channel`` starting ``book`` and a ``data`` array; the
+    # server ``public/heartbeat`` and bare subscribe acks are liveness/control, NOT data (a
+    # heartbeat-/ack-only stream is the failure the watchdog must catch).
+    msg = as_dict(raw)
+    if not isinstance(msg, dict):
+        return False
+    res = msg.get("result")
+    return (isinstance(res, dict)
+            and str(res.get("channel", "")).startswith("book")
+            and bool(res.get("data")))
+
+
 def _is_data_bitstamp(raw: Any) -> bool:
     msg = as_dict(raw)
     return (isinstance(msg, dict)
@@ -264,6 +280,7 @@ _DATA_CLASSIFIERS: dict[str, Callable[[Any], bool]] = {
     "coinbase": _is_data_coinbase,
     "coinbase_advanced": _is_data_coinbase_advanced,
     "gemini": _is_data_gemini,
+    "cryptocom": _is_data_cryptocom,
     "bitstamp": _is_data_bitstamp,
     "binance": _is_data_binance,
     "bybit": _is_data_bybit,

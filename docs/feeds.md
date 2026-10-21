@@ -488,6 +488,94 @@ crossed-book is a best-effort detector.
 
 ---
 
+## 5C. Crypto.com Exchange v1 `book` L2 (BRTI constituent) — BTC/USD spot
+
+> **Doc note.** VERIFIED from the primary Crypto.com doc — the v1 `book.{instrument_name}.{depth}`
+> channel page `https://exchange-developer.crypto.com/exchange/v1/docs/api/websocket/ws-channel-book-instrument-name-depth`
+> (the old `https://exchange-docs.crypto.com/exchange/v1/rest-ws/index.html` **301-redirects** here;
+> read 2026-10-21) AND confirmed on the live wire by a brief read-only probe from **BOTH** the
+> Ashburn-US and EU boxes (`wss://stream.crypto.com/exchange/v1/market`, `book.BTC_USD.50`,
+> SNAPSHOT_AND_UPDATE, 2026-10-21). An L2 **price-level** feed (price→qty), depth-capped at 50.
+
+**Endpoint (VERIFIED):** `wss://stream.crypto.com/exchange/v1/market` — **PUBLIC market data, no auth.**
+
+**Instrument (VERIFIED):** `BTC_USD` — the BTC/USD **spot** pair (`inst_type` `CCY_PAIR`, base BTC /
+quote USD; confirmed from the public `get-instruments` REST read, 2026-10-21). The doc examples'
+`BTCUSD-PERP` is the **perpetual** (a different instrument) — we record spot for BRTI. Depth **50**
+(the venue max; the `book.{instrument_name}` no-depth form was removed, explicit depth now REQUIRED).
+
+**Subscribe (VERIFIED), one frame:**
+```json
+{"id":1,"method":"subscribe","params":{"channels":["book.BTC_USD.50"],
+ "book_subscription_type":"SNAPSHOT_AND_UPDATE","book_update_frequency":100},"nonce":<ms>}
+```
+`SNAPSHOT_AND_UPDATE` is the 100 ms delta mode (the full-snapshot-only feed was retired 2025-02);
+`book_update_frequency` ∈ {10,100,500} ms. `nonce` is a fresh current-ms timestamp (regenerated per
+connect via `subscribe_factory`; public — no credential). Unsubscribe mirrors with `"method":"unsubscribe"`.
+
+**Messages (VERIFIED on the wire):** book data rides in `result` (`result.channel` starts `book`);
+`result.data` is an array of ONE object:
+- **SNAPSHOT** (first frame after subscribe, and after any resubscribe/reconnect) — `data[0]` has
+  top-level `asks` and `bids` (the FULL depth-capped book), `u` (sequence), `t`/`tt` (ms timestamps),
+  `cs` (book checksum); **NO `pu`**. (`snapshot_fields = [asks,bids,cs,t,tt,u]`.)
+- **DELTA** — `data[0]` has an `update` object holding the CHANGED `asks`/`bids`, plus `u` (this
+  sequence) and `pu` (previous sequence); NO top-level `asks`/`bids`. (`delta_fields = [cs,pu,t,tt,u,update]`.)
+- Each level is `[price, quantity, num_orders]` as strings (REST get-book doc: "bids/asks are
+  [Price, Quantity, NumOrders]"); `quantity` is the FULL (absolute SET) size at the level, `"0"`
+  REMOVES it. `num_orders` is unused for an L2 price book. Prices/qtys kept `Decimal` from the exact
+  strings.
+
+**Book model:** price-level (`PriceLevelBook`). NOTE (REV-029 F1): `PriceLevelBook` does **NOT**
+cap/trim its size — it holds every level ever SET until an explicit qty-0 removal. Crypto.com's
+`book.BTC_USD.50` is depth-capped at 50, so if the venue does **not** emit a qty-0 remove when a
+level is pushed out of the top-50 window, that level lingers as a stale "ghost" (the Bitstamp-reseed
+class, REV-026) until the next reseed — the `pu` chain can't detect it and the `cs` checksum is
+unused (F-12). **Consume-gate (not a recording gate):** before this feed is admitted to the BRTI
+replica/fair value, close F1 — trim each side to the top 50 by price after every apply (matches the
+venue window and evicts the ghost), OR verify+record that the venue sends removes for evicted levels
+— plus a tracking-error study. Safe to RECORD as-is (raw is complete; the fix is reconstruction-side,
+applies to already-recorded raw like the Bitstamp fix).
+
+**Gap detection (VERIFIED — the real, documented mechanism):** deltas apply in strict order where
+**`pu` of the new message equals `u` of the previous message** (Binance-USDⓈ-M-futures-style chain).
+The snapshot anchors `last_u = u`; a `pu` that does not match `last_u` is a dropped message → the gap
+is logged (never silent), the in-band resync is armed, and deltas are DROPPED until the reseed
+snapshot re-anchors. **VERIFIED on the live wire: 37/37 (Ashburn) and 38/38 (EU) consecutive
+`pu == prev.u` checks held.** The frames also carry a `cs` book checksum (present on the wire but its
+algorithm is not spelled out on the current doc page — we do NOT rely on it and do NOT invent one;
+future hardening, F-12).
+
+**Heartbeat (VERIFIED doc + wire):** the server sends `{"id":N,"method":"public/heartbeat","code":0}`
+~every 30 s; the client MUST reply `{"id":N,"method":"public/respond-heartbeat"}` (echoing the id)
+within 5 s or the server disconnects. The pure processor QUEUES the reply on `self.outbound`; the IO
+layer (`run_recorder`) sends it over the live socket right after `process` (a new, general,
+backward-compatible seam — empty for every other venue). The websockets library's protocol ping is a
+second liveness layer.
+
+**Snapshot vs delta (no `type` marker):** structural — a DELTA carries an `update` object; a SNAPSHOT
+carries top-level `asks`/`bids` and no `update`/`pu`. A mid-stream snapshot while synced is the
+reconnect/resubscribe reseed → rebuild SILENTLY (the triggering disconnect/gap is already logged).
+
+**Resync (in-band, like Bybit / Coinbase-Advanced / Gemini — no REST):** on a `pu` break, resubscribe
+(unsubscribe + subscribe `book`) → a fresh SNAPSHOT rebuilds the book and clears the flags. While
+awaiting it, deltas are dropped without re-arming resync. `resync_on_connect=False`.
+
+**Geo (VERIFIED 2026-10-21):** Crypto.com market-data WS is reachable from **BOTH** boxes — the
+read-only probe connected, subscribed (ack `code:0`), and streamed a full snapshot + deltas from
+Ashburn (US) AND the EU box (DE). NOT geo-restricted for market data → deploys to the **Ashburn (US)
+box** alongside the other BRTI constituents (Coinbase/Gemini/Kraken/Bitstamp).
+
+**Writer path:** `cryptocom/book_btcusd`. Feed name `cryptocom-book`, `required_env=()`.
+
+**Status: VERIFIED** (endpoint, spot instrument `BTC_USD`, subscribe envelope + depth, snapshot/delta
+schema, `[price,qty,num_orders]` level format, `pu == prev.u` gap chain, `public/heartbeat` →
+`public/respond-heartbeat` requirement — doc 2026-10-21 + live wire 2026-10-21 both boxes).
+**PARTIAL/UNVERIFIED:** (a) the `cs` checksum algorithm (F-12); (b) connection / message-rate limits
+not recorded (not load-bearing for one BTC_USD feed); (c) exact server heartbeat cadence taken from
+the doc (30 s) — only one heartbeat was observed in the short probe window.
+
+---
+
 ## 6. Cross-venue summary table
 
 | Venue | BRTI? | Endpoint (prod) | Auth | Gap-detection field | Snapshot / resync | Status |
@@ -499,6 +587,7 @@ crossed-book is a best-effort detector.
 | **Binance** USDⓈ-M `@depth`+`@aggTrade` | lead signal | `wss://fstream.binance.com` | public | **`pu`** (`pu == prev.u`) | REST `fapi/v1/depth?limit=1000` → `lastUpdateId`; `U≤id≤u` align; `pu` chain | VERIFIED resync/`pu` (stream speeds + field example + trades/limits PARTIAL) |
 | **Bybit** v5 linear `orderbook`+`publicTrade` | lead signal | `wss://stream.bybit.com/v5/public/linear` | public | **`type=="snapshot"`** reset (`u`/`seq` monotonic) | reset book on every `snapshot`; reconnect → snapshot | VERIFIED incl. trades (numeric-gap rule PARTIAL) |
 | **Gemini** v2 `marketdata` `l2` (BTCUSD) | constituent | `wss://api.gemini.com/v2/marketdata` | **public** | **NONE (no seq field exists)** — best-effort crossed-book (`bid>ask`) + reconnect-reseed | `trades`/`auction_events`-bearing `l2_updates` = snapshot resets; in-band resubscribe → fresh snapshot | VERIFIED 2026-10-21 doc + 2026-10-20 wire (page *Archived* F-10; crossed-book PARTIAL) |
+| **Crypto.com** Exchange v1 `book` (BTC_USD spot) | constituent | `wss://stream.crypto.com/exchange/v1/market` | **public** | **`pu`** (`pu == prev.u`, delta chain; snapshot anchors `u`) | SNAPSHOT (`update`-absent) resets; in-band resubscribe → fresh snapshot | VERIFIED 2026-10-21 doc + live wire BOTH boxes (`cs` checksum unused, F-12; limits PARTIAL) |
 
 ---
 
@@ -517,6 +606,8 @@ crossed-book is a best-effort detector.
 | F-9 | **Binance diff-depth stream speeds + U/u/pu field example** — from a search excerpt; the diff-depth page body did not render. (The `pu`-chaining resync algorithm is VERIFIED separately from the How-to-manage page.) | PARTIAL | Render/fetch the Binance USDⓈ-M Diff-Book-Depth page body. |
 | F-10 | **Gemini v2 `marketdata` is tagged *Archived* / deprecated** ("replaced by the new WebSocket API"). The v2 endpoint `wss://api.gemini.com/v2/marketdata` is STILL LIVE (probed 2026-10-20) and is what we build on, but Gemini could retire it. The new API (`wss://ws.gemini.com`, `L2 Partial/Differential Depth` streams, `SUBSCRIBE`/`UNSUBSCRIBE`) has a DIFFERENT schema we have not verified. | RISK (endpoint live) | Monitor for v2 retirement; if retired, port to the new WebSocket API (new feeds.md section + re-verify schema incl. whether it has a sequence number). |
 | F-11 | **Gemini v2 `l2` has NO sequence/ordering field (VERIFIED absence).** Gap detection is best-effort (crossed-book) + reconnect-reseed; a non-crossing missed update is undetectable in-band until the next reseed. | PARTIAL (by venue design) | Nothing in-feed can close it (no seq exists). Mitigate with periodic reseeds; quantify any drift against the BRTI replica / other constituents in a tracking study. |
+| F-12 | **Crypto.com book `cs` checksum algorithm not documented on the current page.** Each book frame carries a `cs` integer (present on the wire); the old docs described it loosely as a book checksum, but the live OpenAPI page does not specify the algorithm. We do NOT use it (gap detection is the VERIFIED `pu == prev.u` chain) and do NOT invent one. | PARTIAL (not load-bearing) | Find the documented `cs` algorithm (or reverse-engineer + validate against a recorded hour) to add a second, Kraken-CRC-style integrity check on top of the `pu` chain. |
+| F-13 | **Crypto.com connection / message-rate / subscription limits not recorded**, and the server heartbeat cadence (doc: 30 s) was only observed once in the short probe. | PARTIAL | Read the WS connection-limits section; observe heartbeat cadence over a longer capture. |
 
 ---
 
