@@ -45,7 +45,18 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from . import binance, bitstamp, bybit, coinbase, coinbase_advanced, cryptocom, gemini, kalshi, kraken
+from . import (
+    binance,
+    bitstamp,
+    bullish,
+    bybit,
+    coinbase,
+    coinbase_advanced,
+    cryptocom,
+    gemini,
+    kalshi,
+    kraken,
+)
 from . import kalshi_dynamic
 from . import resync as resync_mod
 from .base import IoConfig, MessageProcessor, logger, run_recorder
@@ -282,6 +293,15 @@ def _build_cryptocom(name: str, env: Mapping[str, str], root: str, **_: Any) -> 
     return BuiltFeed(name, "cryptocom", "book_btcusd", cfg, [proc], rb, root)
 
 
+def _build_bullish(name: str, env: Mapping[str, str], root: str, **_: Any) -> BuiltFeed:
+    # Public Bullish L2 orderbook (no auth). Writer path: bullish/l2_btcusd. In-band resync
+    # (resubscribe → fresh full snapshot). BRTI constituent (BTC/USD spot).
+    cfg = bullish.io_config()
+    proc = bullish.BullishL2Processor()
+    rb = resync_mod.bullish_resync_builder()
+    return BuiltFeed(name, "bullish", "l2_btcusd", cfg, [proc], rb, root)
+
+
 def _build_kalshi(name: str, env: Mapping[str, str], root: str, *,
                   signer_factory: SignerFactory | None = None,
                   kalshi_fetch: Fetcher | None = None, **_: Any) -> BuiltFeed:
@@ -424,6 +444,11 @@ FEEDS: dict[str, FeedDef] = {
         "cryptocom-book",
         (),  # public v1 market-data book feed — no credentials
         lambda env, root, **kw: _build_cryptocom("cryptocom-book", env, root, **kw),
+    ),
+    "bullish-l2": FeedDef(
+        "bullish-l2",
+        (),  # public Bullish market-data WS — no credentials
+        lambda env, root, **kw: _build_bullish("bullish-l2", env, root, **kw),
     ),
     "kalshi": FeedDef(
         "kalshi",

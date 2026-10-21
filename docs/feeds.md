@@ -576,6 +576,112 @@ the doc (30 s) — only one heartbeat was observed in the short probe window.
 
 ---
 
+## 5D. Bullish Exchange public `l2Orderbook` (L2) (BRTI constituent) — BTCUSD spot
+
+> **Doc note.** VERIFIED from the primary Bullish docs — the public market-data orderbook page
+> `https://docs.exchange.bullish.com/websocket/public/market-data/orderbook` ("Multi-Order Book Data
+> WebSocket"), the server list `…/websocket/servers/server`, the keepalive page
+> `…/websocket/protocol/keepalive`, and the official `bullish-exchange/api-examples`
+> `websocket/multi_orderbook_web_socket.py` sample — all read 2026-10-21 — AND confirmed on the live
+> wire by a brief read-only probe from **BOTH** the Ashburn-US and EU boxes
+> (`wss://api.exchange.bullish.com/trading-api/v1/market-data/orderbook`, `l2Orderbook` BTCUSD,
+> 2026-10-21). The docs site is a Docusaurus SPA — WebFetch rendered the markdown, and `curl` on the
+> `…/index.html` form served the full server-rendered HTML (the bare path returns 0 bytes). Bullish
+> FIX explicitly carries **no** market data; this WS is the public market-data source.
+
+**Endpoint (VERIFIED):** `wss://api.exchange.bullish.com/trading-api/v1/market-data/orderbook` —
+**PUBLIC market data, no auth.** Host `wss://api.exchange.bullish.com` (server page) + path
+`/trading-api/v1/market-data/orderbook` (orderbook page and the sample's `HOST_NAME + "/trading-api/
+v1/market-data/orderbook"`). Simnext test host: `wss://api.simnext.bullish-test.com`. Many
+symbols/topics multiplex on ONE socket.
+
+**Symbol (VERIFIED):** `BTCUSD` — the BTC/USD **spot** market (`marketId` `10000`, `marketType`
+`SPOT`, base `BTC` / quote `USD`, `tickSize` `0.1`, `pricePrecision` 4 / `quantityPrecision` 8;
+confirmed from the public REST `GET https://api.exchange.bullish.com/trading-api/v1/markets`,
+2026-10-21). (There are many BTC-quote variants — `BTCUSDC`, `BTCUSDT`, `BTCEUR`, … — we record the
+USD spot pair for BRTI.)
+
+**Subscribe (VERIFIED), one JSON-RPC 2.0 frame:**
+```json
+{"jsonrpc":"2.0","type":"command","method":"subscribe",
+ "params":{"topic":"l2Orderbook","symbol":"BTCUSD"},"id":"1"}
+```
+The L2 topic string `l2Orderbook` is VERIFIED from the official api-examples sample (the doc page only
+prints the `l1Orderbook` example but documents "L1 / L2 depending on your topic"; the probe confirmed
+`l2Orderbook` streams V1TALevel2). `id` is a client command id for request/response mapping only (no
+credential, no nonce). Unsubscribe mirrors with `"method":"unsubscribe"`. Ack:
+`{"id":…,"jsonrpc":"2.0","result":{"responseCode":"200","responseCodeName":"OK","message":"Successfully subscribed ( BTCUSD N)"}}`.
+
+**Messages (VERIFIED on the wire):** book frames carry `dataType:"V1TALevel2"`. `data` is the book
+OBJECT on the wire (the generic envelope docs snapshots as `data:[{…}]` and updates as `data:{…}` — we
+accept either). The object has: `symbol`, `bids` and `asks` as **FLAT string arrays alternating
+price,qty** (`[p0,q0,p1,q1,…]`, NOT nested pairs), `sequenceNumberRange` `[firstSeq,lastSeq]` (ints),
+`datetime` (ISO), `timestamp` (ms string), `publishedAtTimestamp` (ms string).
+- **SNAPSHOT** (`type:"snapshot"`) — the FULL book. **VERIFIED to be the ONLY L2 frame BTCUSD emits:
+  43/43 data frames over the probe (each box) were `type:"snapshot"`, zero `type:"update"`.** Bullish
+  publishes a periodic full-book snapshot and labels each with the contiguous `sequenceNumberRange` of
+  the internal events it folded in. A snapshot REPLACES the book wholesale (clear + rebuild).
+- **UPDATE** (`type:"update"`, same `dataType`) — documented in the generic envelope but **NEVER
+  observed on the wire** (UNVERIFIED). We handle it defensively as an absolute-SET per level (`qty "0"`
+  removes), the standard convention for these feeds; tagged UNVERIFIED (F-16). It is NOT the hot path.
+
+Prices/qtys kept `Decimal` from the exact transmitted strings.
+
+**Book model:** price-level (`PriceLevelBook`). **Depth-cap / ghost-level note (vs REV-029 F1):** on
+the SNAPSHOT path this feed is IMMUNE to the Crypto.com ghost-level class — every frame is an
+authoritative full book that CLEARS and rebuilds, so a level pushed out of the published depth cannot
+linger. The REV-029 F1 risk applies ONLY to the UNVERIFIED incremental UPDATE path (if updates exist
+and the book is depth-capped, an evicted level could ghost); since we never observed updates, this is
+a documented future caveat (F-16 consume-gate), not a live concern. (Exact published snapshot depth
+not characterized; the probe frames were large — hundreds of levels/side.)
+
+**Gap detection (VERIFIED — the real, documented field, NOT invented):** each L2 frame carries
+`sequenceNumberRange = [firstSeq,lastSeq]` and consecutive frames CHAIN with **`firstSeq` of the new
+frame == `lastSeq` of the previous frame + 1**. **VERIFIED on the live wire: 42/42 (Ashburn) and 42/42
+(EU) consecutive `first == prev.last+1` checks held, 0 breaks.** The snapshot anchors `last_seq =
+lastSeq`. A `firstSeq` that does not continue the chain means a dropped batch → the gap is LOGGED
+(never silent). On the SNAPSHOT path the same frame that reveals the gap also fully rebuilds the book,
+so the book self-heals immediately and NO resync is armed (log-only, informational — we did miss
+published book states). On the (UNVERIFIED) UPDATE path a chain break would corrupt an incremental
+book, so there we arm the in-band resync + `awaiting_snapshot` and drop updates until a fresh snapshot
+re-anchors (exactly like Crypto.com's `pu` break). A snapshot that lands while `awaiting_snapshot`
+(the expected resync reseed, or begin_resync) re-anchors SILENTLY.
+
+**Keepalive (VERIFIED doc + wire):** an *idle* socket is closed after **5 minutes**. The client sends
+`{"jsonrpc":"2.0","type":"command","method":"keepalivePing","params":{},"id":…}` periodically; the
+server answers `{"result":{"responseCode":200,"responseCodeName":"OK","message":"Keep alive pong"}}`
+(observed on the wire). The official sample pings every 300 s; we send it every **120 s** via the
+fixed-cadence `ping_message` seam (well inside the 5-min window), plus the websockets library's own
+protocol ping. A continuous BTCUSD book is never idle in practice, so this is belt-and-suspenders.
+
+**Snapshot vs update (discriminator):** the envelope `type` field — `"snapshot"` (full replace) vs
+`"update"` (incremental). On the wire BTCUSD L2 is snapshot-only.
+
+**Resync (in-band, like Bybit / Coinbase-Advanced / Gemini / Crypto.com — no REST):** resubscribe
+(unsubscribe + subscribe `l2Orderbook`) → a fresh full SNAPSHOT rebuilds the book and clears the
+flags. `resync_on_connect=False` (the initial subscribe already yields the reseed snapshot; a
+reconnect reseeds via the processor's own snapshot handling). The non-auth REST
+`GET /trading-api/v1/markets/:symbol/orderbook/hybrid` snapshot exists as an alternate seed source but
+is NOT needed (the WS pushes full snapshots continuously).
+
+**Geo (VERIFIED 2026-10-21):** Bullish public market-data WS is reachable from **BOTH** boxes — the
+read-only probe connected, subscribed (ack `responseCode 200`), and streamed full snapshots from
+Ashburn (US) AND the EU box (DE), 45 frames each, keepalive pong observed. **NOT** geo-restricted for
+public market data → deploys to the **Ashburn (US) box** alongside the other BRTI spot constituents
+(Coinbase/Gemini/Kraken/Bitstamp/Crypto.com).
+
+**Writer path:** `bullish/l2_btcusd`. Feed name `bullish-l2`, `required_env=()`.
+
+**Status: VERIFIED** (endpoint host+path, public/no-auth, spot symbol `BTCUSD` via REST, JSON-RPC 2.0
+subscribe envelope + L2 topic `l2Orderbook`, V1TALevel2 full-snapshot schema + flat `bids`/`asks`
+arrays, `sequenceNumberRange` first==prev.last+1 chain, `keepalivePing`/pong + 5-min idle — doc +
+official sample 2026-10-21 + live wire 2026-10-21 BOTH boxes). **PARTIAL/UNVERIFIED:** (a) the
+`type:"update"` incremental semantics — documented but never seen on the wire, handled defensively
+(F-16); (b) exact published snapshot depth and whether evicted levels ghost on the update path (F-16);
+(c) connection / message-rate / subscription limits not recorded (F-17).
+
+---
+
 ## 6. Cross-venue summary table
 
 | Venue | BRTI? | Endpoint (prod) | Auth | Gap-detection field | Snapshot / resync | Status |
@@ -588,6 +694,7 @@ the doc (30 s) — only one heartbeat was observed in the short probe window.
 | **Bybit** v5 linear `orderbook`+`publicTrade` | lead signal | `wss://stream.bybit.com/v5/public/linear` | public | **`type=="snapshot"`** reset (`u`/`seq` monotonic) | reset book on every `snapshot`; reconnect → snapshot | VERIFIED incl. trades (numeric-gap rule PARTIAL) |
 | **Gemini** v2 `marketdata` `l2` (BTCUSD) | constituent | `wss://api.gemini.com/v2/marketdata` | **public** | **NONE (no seq field exists)** — best-effort crossed-book (`bid>ask`) + reconnect-reseed | `trades`/`auction_events`-bearing `l2_updates` = snapshot resets; in-band resubscribe → fresh snapshot | VERIFIED 2026-10-21 doc + 2026-10-20 wire (page *Archived* F-10; crossed-book PARTIAL) |
 | **Crypto.com** Exchange v1 `book` (BTC_USD spot) | constituent | `wss://stream.crypto.com/exchange/v1/market` | **public** | **`pu`** (`pu == prev.u`, delta chain; snapshot anchors `u`) | SNAPSHOT (`update`-absent) resets; in-band resubscribe → fresh snapshot | VERIFIED 2026-10-21 doc + live wire BOTH boxes (`cs` checksum unused, F-12; limits PARTIAL) |
+| **Bullish** public `l2Orderbook` (BTCUSD spot) | constituent | `wss://api.exchange.bullish.com/trading-api/v1/market-data/orderbook` | **public** | **`sequenceNumberRange`** (`firstSeq == prev.lastSeq+1`) | every frame is a FULL `V1TALevel2` snapshot (self-healing); in-band resubscribe → fresh snapshot | VERIFIED 2026-10-21 doc + official sample + live wire BOTH boxes (`type:"update"` path UNVERIFIED, F-16; limits PARTIAL, F-17) |
 
 ---
 
@@ -608,6 +715,10 @@ the doc (30 s) — only one heartbeat was observed in the short probe window.
 | F-11 | **Gemini v2 `l2` has NO sequence/ordering field (VERIFIED absence).** Gap detection is best-effort (crossed-book) + reconnect-reseed; a non-crossing missed update is undetectable in-band until the next reseed. | PARTIAL (by venue design) | Nothing in-feed can close it (no seq exists). Mitigate with periodic reseeds; quantify any drift against the BRTI replica / other constituents in a tracking study. |
 | F-12 | **Crypto.com book `cs` checksum algorithm not documented on the current page.** Each book frame carries a `cs` integer (present on the wire); the old docs described it loosely as a book checksum, but the live OpenAPI page does not specify the algorithm. We do NOT use it (gap detection is the VERIFIED `pu == prev.u` chain) and do NOT invent one. | PARTIAL (not load-bearing) | Find the documented `cs` algorithm (or reverse-engineer + validate against a recorded hour) to add a second, Kraken-CRC-style integrity check on top of the `pu` chain. |
 | F-13 | **Crypto.com connection / message-rate / subscription limits not recorded**, and the server heartbeat cadence (doc: 30 s) was only observed once in the short probe. | PARTIAL | Read the WS connection-limits section; observe heartbeat cadence over a longer capture. |
+| F-14 | **Bullish docs are a Docusaurus SPA.** The bare doc path returns 0 bytes to `curl`; WebFetch rendered markdown and `curl` on the `…/index.html` form served full HTML. The L2 **topic name** is not printed on the orderbook page (only `l1Orderbook`); it was resolved to `l2Orderbook` from the official `bullish-exchange/api-examples` sample **and** confirmed on the live wire. | RESOLVED (via sample + wire) | — (closed; topic VERIFIED). |
+| F-15 | **Bullish L2 is snapshot-only on the wire.** The docs say "an initial snapshot followed by incremental updates," but BTCUSD L2 emitted ONLY `type:"snapshot"` full books (43/43 per box) over the probe. Each snapshot carries a `sequenceNumberRange` and chains `first == prev.last+1` (42/42 both boxes). The processor's hot path (full-snapshot replace + seq-chain gap logging) is VERIFIED; it self-heals (no resync) on a snapshot-path gap. | VERIFIED (snapshot path) | — (the snapshot path is the observed contract; the update path is F-16). |
+| F-16 | **Bullish `type:"update"` incremental path UNVERIFIED.** Documented (generic envelope `type:"update"`, same `V1TALevel2` dataType) but NEVER observed on the wire for BTCUSD L2. The adapter handles it defensively as an absolute-SET per level (`qty "0"` removes) with seq-chain gap→resync, tagged UNVERIFIED. **Consume-gate (not a recording gate):** if updates ever appear AND the book is depth-capped, an evicted level could ghost (REV-029 F1 class) — verify the update semantics + removal signaling and whether evicted levels are removed before admitting the update path to the BRTI replica. Safe to RECORD as-is (raw is complete; fix is reconstruction-side). | PARTIAL / UNVERIFIED | A longer capture that elicits `type:"update"` frames, or a Bullish doc section spelling out the L2 update delta semantics + removal signaling. |
+| F-17 | **Bullish connection / message-rate / subscription limits not recorded**, and published L2 snapshot depth + snapshot cadence not characterized. The 5-min idle-close and `keepalivePing`/pong ARE verified (doc + wire). | PARTIAL | Read the Bullish WS connection-limits section; measure snapshot cadence + depth over a longer capture. |
 
 ---
 
@@ -637,4 +748,10 @@ the doc (30 s) — only one heartbeat was observed in the short probe window.
 | Kalshi — WebSocket **orderbook updates** (orderbook_snapshot/delta schema) | `https://docs.kalshi.com/websockets/orderbook-updates` | read 2026-10-17 | VERIFIED (envelope `type`/`sid`/`seq`; snapshot `yes_dollars_fp`/`no_dollars_fp` `[price_dollars,count_fp]` string pairs; delta `price_dollars`+SIGNED `delta_fp`+`side` yes/no) |
 | Kalshi — **live authed WS capture** (box, KXBTC15M, 2026-10-17): orderbook + TRADE schema, msg-wrapper, seq reset | live wire (authed; reads only) | captured 2026-10-17 | VERIFIED — payload NESTED under `msg`; `seq` per-sid resets to 1 on reconnect; **trade** msg = `trade_id`/`yes_price_dollars`/`no_price_dollars`/`count_fp`/`taker_side`/`taker_outcome_side`/`taker_book_side`/`is_block_trade`/`ts`/`ts_ms`. Connection STABLE (10,113 frames/22 s, 0 crashes) — earlier "4 s keepalive drop" was a misdiagnosed `KeyError` reconnect, now fixed. unsubscribe-`sids` still INFERRED |
 | Kalshi — **WebSocket connection** (`update_subscription` dynamic add/remove markets, limits) | `https://docs.kalshi.com/websockets/websocket-connection` | read 2026-10-17 | VERIFIED — `{"id":N,"cmd":"update_subscription","params":{"sids":[sid],"market_tickers":[...],"action":"add_markets"\|"delete_markets"\|"get_snapshot"}}` edits a LIVE subscription without reconnect (same sid); `sids` = one-element array; per-sub market-limit = error **26**, command rate-limit = error **27** (limit values undocumented); max **5** concurrent WS per user |
+| Bullish — public market-data orderbook WS ("Multi-Order Book Data WebSocket": subscribe/ack/keepalive + `V1TALevel2` snapshot schema) | `https://docs.exchange.bullish.com/websocket/public/market-data/orderbook` (SPA; `…/index.html` via `curl` served full HTML; WebFetch rendered markdown) | not versioned; read 2026-10-21 | VERIFIED (endpoint path, JSON-RPC 2.0 subscribe, ack, `V1TALevel2` snapshot with flat `bids`/`asks` + `sequenceNumberRange`; L2 **update** schema NOT shown — F-16) |
+| Bullish — WS servers (public host) | `https://docs.exchange.bullish.com/websocket/servers/server` | read 2026-10-21 | VERIFIED — prod `wss://api.exchange.bullish.com`, simnext `wss://api.simnext.bullish-test.com` |
+| Bullish — WS keepalive (5-min idle close, `keepalivePing`) | `https://docs.exchange.bullish.com/websocket/protocol/keepalive` | read 2026-10-21 | VERIFIED |
+| Bullish — official api-examples multi-orderbook sample (`l2Orderbook` topic, endpoint path, keepalive cadence) | `https://github.com/bullish-exchange/api-examples/blob/master/websocket/multi_orderbook_web_socket.py` | read 2026-10-21 | VERIFIED — `topic:"l2Orderbook"`, `HOST_NAME + "/trading-api/v1/market-data/orderbook"`, keepalivePing every 300 s |
+| Bullish — public REST markets (BTCUSD spot `marketId`/`marketType`) | `https://api.exchange.bullish.com/trading-api/v1/markets` | read 2026-10-21 | VERIFIED — `BTCUSD` = `marketId 10000`, `marketType SPOT`, base BTC/quote USD, tickSize 0.1 |
+| Bullish — **live read-only wire probe** (both boxes, BTCUSD `l2Orderbook`): snapshot-only + seq chain + keepalive pong | `wss://api.exchange.bullish.com/trading-api/v1/market-data/orderbook` (public; connect→subscribe→~45 frames→disconnect) | captured 2026-10-21 (Ashburn-US + EU) | VERIFIED — 43/43 frames `type:"snapshot"` `dataType:"V1TALevel2"`, `data` object with flat `bids`/`asks`; `sequenceNumberRange` chain `first==prev.last+1` 42/42 both boxes; `keepalivePing`→"Keep alive pong"; reachable from BOTH boxes |
 | Kalshi — **live authed update_subscription** (box, KXBTC15M, 2026-10-17): dynamic ticker mgmt (ROADMAP 1.3) | live wire (authed; reads only) | validated 2026-10-17 | VERIFIED on the wire — subscribe `orderbook_delta`→sid=1, `trade`→sid=2; `update_subscription get_snapshot` on sid=1 re-emitted an `orderbook_snapshot` for the market (seq re-anchored); `update_subscription add_markets [next window]` on sid=1 returned `{"type":"ok","id":1001,"msg":{"market_tickers":[...both...]}}` and emitted an `orderbook_snapshot` for the ADDED market on the SAME sid=1 (an `initialized` market returns an empty 0-level snapshot — so the next window can be pre-added before open). **No error-26/27.** No reconnect. All snapshots stayed on the orderbook sid. The `update_subscription` ack type is `ok` (not `subscribed`) — no new sid is created, so sids are captured only from the initial `subscribed` acks |
