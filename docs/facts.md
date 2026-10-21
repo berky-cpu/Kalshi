@@ -107,6 +107,19 @@ CRC32 checksum (incl. worked example `1063832831`), and Binance `pu` rules again
   microtimestamp/+1 counter. The Bitstamp adapter is being updated to use this (the R2 microtimestamp-regression
   default was a stopgap). (`microtimestamp` ordering + `since_id` REST backfill still apply to the separate
   `detail/diff_order_book` channel.)
+- **Bitstamp order-id reuse — VERIFIED (empirical) / UNVERIFIED (doc), 2026-10-20** (REV-026 F1,
+  data-engineer). **Correctness-critical assumption for the reseed-resurrection guard** in
+  `src/kbtc/recorders/bitstamp.py`: the guard keys purely on `data.id`, so if an id were reused within the
+  120 s guard window a stale `_recent_deletes[id]` could silently DROP a genuinely-resting snapshot order
+  (book under-counts, no crossing, no alarm — an invisible bias). **Empirical result: CLEAN.** Scanned every
+  `order_created` id in the recorded raw for 2026-10-18/19/20 (`/opt/kbtc/data/raw/bitstamp/live_orders_btcusd/`):
+  **21,129,299 ids, ZERO duplicates** — 0 within any single day (6.15M / 7.27M / 7.71M creates resp.) and 0
+  across the full 3-day span (distinct_ids == creates_scanned). So no id reuse within any realistic guard
+  window (verified over 3 days ≫ the 120 s window). The Bitstamp observed ids are large and monotonically
+  increasing per connection, consistent with non-reuse. **Doc side UNVERIFIED:** the primary WS v2 page is
+  JS-rendered and did not yield text to `WebFetch`; no explicit "ids are unique / never reused" statement was
+  located in a primary doc. Risk if this ever changes: see the CORRECTNESS-CRITICAL note in `bitstamp.py`.
+  Source: empirical scan of recorded raw (read-only, box root@5.161.236.203), 2026-10-20.
 - **Binance** diff-depth stream speeds + aggTrade field list stay **PARTIAL** — Berk reports the USDⓈ-M stream
   doc pages no longer exist; the resync/`pu` algorithm is VERIFIED (How-to-manage page). Revisit if Binance republishes.
 - **Kraken** host is a 3-way conflict (`ws-l3` / `ws-auth` / `ws`) → recorder tries all three with fallback.
