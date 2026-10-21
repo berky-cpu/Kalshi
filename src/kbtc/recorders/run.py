@@ -45,7 +45,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from . import binance, bitstamp, bybit, coinbase, coinbase_advanced, gemini, kalshi, kraken
+from . import binance, bitstamp, bybit, coinbase, coinbase_advanced, cryptocom, gemini, kalshi, kraken
 from . import kalshi_dynamic
 from . import resync as resync_mod
 from .base import IoConfig, MessageProcessor, logger, run_recorder
@@ -273,6 +273,15 @@ def _build_gemini(name: str, env: Mapping[str, str], root: str, **_: Any) -> Bui
     return BuiltFeed(name, "gemini", "l2_btcusd", cfg, [proc], rb, root)
 
 
+def _build_cryptocom(name: str, env: Mapping[str, str], root: str, **_: Any) -> BuiltFeed:
+    # Public v1 market-data book (L2, depth 50, no auth). Writer path: cryptocom/book_btcusd.
+    # In-band resync (resubscribe → fresh snapshot). BRTI constituent (BTC/USD spot).
+    cfg = cryptocom.io_config()
+    proc = cryptocom.CryptoComL2Processor()
+    rb = resync_mod.cryptocom_resync_builder()
+    return BuiltFeed(name, "cryptocom", "book_btcusd", cfg, [proc], rb, root)
+
+
 def _build_kalshi(name: str, env: Mapping[str, str], root: str, *,
                   signer_factory: SignerFactory | None = None,
                   kalshi_fetch: Fetcher | None = None, **_: Any) -> BuiltFeed:
@@ -410,6 +419,11 @@ FEEDS: dict[str, FeedDef] = {
         "gemini-l2",
         (),  # public v2 marketdata feed — no credentials
         lambda env, root, **kw: _build_gemini("gemini-l2", env, root, **kw),
+    ),
+    "cryptocom-book": FeedDef(
+        "cryptocom-book",
+        (),  # public v1 market-data book feed — no credentials
+        lambda env, root, **kw: _build_cryptocom("cryptocom-book", env, root, **kw),
     ),
     "kalshi": FeedDef(
         "kalshi",

@@ -50,7 +50,7 @@ import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from . import binance, bitstamp, bybit, coinbase, coinbase_advanced, gemini, kalshi, kraken
+from . import binance, bitstamp, bybit, coinbase, coinbase_advanced, cryptocom, gemini, kalshi, kraken
 from .base import MessageProcessor, logger, now_ns
 
 JsonFetch = Callable[[str], Awaitable[Any]]
@@ -309,6 +309,19 @@ def gemini_resync_builder(
     yields the reseed snapshot, and a mid-stream snapshot resets the book via the processor's own
     ``trades``/``auction_events`` signature (so a reconnect reseeds without an extra resubscribe)."""
     frames = gemini.resubscribe_messages(product)
+    return lambda send: ResubscribeResyncer(frames, send)
+
+
+def cryptocom_resync_builder(
+    product: str = cryptocom.INSTRUMENT, depth: int = cryptocom.DEPTH,
+) -> Callable[[WsSend], Resnapshot]:
+    """In-band (like Bybit / Coinbase-Advanced / Gemini): resubscribe to the ``book`` channel →
+    Crypto.com re-pushes a fresh SNAPSHOT that rebuilds the book (no REST fetch). On a ``pu`` chain
+    break the processor arms ``needs_resnapshot``; this pushes unsubscribe+subscribe over the live
+    socket. ``resync_on_connect`` is False — the initial ``subscribe`` already yields the reseed
+    snapshot, and a mid-stream snapshot resets the book via the processor's own structural
+    (``update``-absent) discriminator (so a reconnect reseeds without an extra resubscribe)."""
+    frames = cryptocom.resubscribe_messages(product, depth)
     return lambda send: ResubscribeResyncer(frames, send)
 
 
