@@ -1,0 +1,6 @@
+{"id":"1","jsonrpc":"2.0","result":{"responseCode":"200","responseCodeName":"OK","message":"Successfully subscribed ( BTCUSD 1)"}}
+{"type":"snapshot","dataType":"V1TALevel2","data":{"symbol":"BTCUSD","bids":["100.00","1.0","99.00","2.0"],"asks":["101.00","1.5","102.00","2.0"],"sequenceNumberRange":[1000,1000],"datetime":"2026-10-21T00:00:00.000Z","timestamp":"1771761038000","publishedAtTimestamp":"1771761038000"}}
+{"type":"snapshot","dataType":"V1TALevel2","data":{"symbol":"BTCUSD","bids":["100.50","0.3","100.00","1.0"],"asks":["101.00","2.0","102.00","2.0"],"sequenceNumberRange":[1001,1003],"timestamp":"1771761038100"}}
+{"jsonrpc":"2.0","id":"kbtc-ka","result":{"responseCode":200,"responseCodeName":"OK","message":"Keep alive pong"}}
+{"type":"snapshot","dataType":"V1TALevel2","data":{"symbol":"BTCUSD","bids":["200.00","4.0"],"asks":["201.00","5.0"],"sequenceNumberRange":[9999,9999],"timestamp":"1771761039000"}}
+{"type":"snapshot","dataType":"V1TALevel2","data":{"symbol":"BTCUSD","bids":["200.00","4.5"],"asks":["201.00","5.0"],"sequenceNumberRange":[10000,10000],"timestamp":"1771761039100"}}
