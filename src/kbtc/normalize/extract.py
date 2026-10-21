@@ -141,6 +141,8 @@ def trade_rows(venue: str, channel: str, raw: Any) -> list[dict]:
         return _binance_trades(msg, channel)
     if v == "bybit":
         return _bybit_trades(msg, channel)
+    if v == "gemini":
+        return _gemini_trades(msg, channel)
     if v == "kalshi":
         return _kalshi_trades(msg, channel)
     return []  # kraken level3 / bitstamp live_orders carry no trade tape in our feeds
@@ -195,6 +197,24 @@ def _bybit_trades(msg: Any, channel: str) -> list[dict]:
         out.append(_row(None, exch, "bybit", t.get("s", "BTCUSDT"), channel, t.get("i"),
                         side, _dec(t.get("p")), _dec(t.get("v"))))
     return out
+
+
+def _gemini_trades(msg: Any, channel: str) -> list[dict]:
+    """Gemini v2 ``type:"trade"`` frame (VERIFIED on the wire 2026-10-20). Fields: ``symbol``,
+    ``price``, ``quantity``, ``side`` (TAKER side "buy"/"sell"), ``tid`` (trade id), ``event_id``,
+    ``timestamp`` (ms). ``side`` is already the aggressor/taker side, stored as-is.
+
+    Only the standalone ``trade`` frames are emitted here; the last-50 ``trades`` array embedded in
+    the initial ``l2_updates`` snapshot is a historical BACKFILL and is NOT re-emitted (it would
+    duplicate the live tape and predate the recording window)."""
+    if not isinstance(msg, dict) or msg.get("type") != "trade":
+        return []
+    ts = msg.get("timestamp")
+    exch = int(ts) * NS_PER_MS if ts is not None else None
+    s = msg.get("side")
+    side = str(s).lower() if s else None
+    return [_row(None, exch, "gemini", msg.get("symbol", "BTCUSD"), channel, msg.get("tid"),
+                 side, _dec(msg.get("price")), _dec(msg.get("quantity")))]
 
 
 def _kalshi_trades(msg: Any, channel: str) -> list[dict]:

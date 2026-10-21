@@ -1,0 +1,8 @@
+{"type":"l2_updates","symbol":"BTCUSD","changes":[["buy","27000.00","1.0"],["buy","26990.00","2.0"],["sell","27010.00","1.5"],["sell","27020.00","2.0"]],"trades":[{"type":"trade","symbol":"BTCUSD","event_id":169841458,"timestamp":1560976400428,"price":"27010.00","quantity":"0.0073173","side":"sell","tid":2840140800042677}],"auction_events":[]}
+{"type":"l2_updates","symbol":"BTCUSD","changes":[["buy","27005.00","0.3"]]}
+{"type":"l2_updates","symbol":"BTCUSD","changes":[["buy","26990.00","0.0"]]}
+{"type":"heartbeat","socket_sequence":0}
+{"type":"trade","symbol":"BTCUSD","event_id":169841459,"timestamp":1560976400500,"price":"27010.00","quantity":"0.25","side":"buy","tid":2840140800042678}
+{"type":"l2_updates","symbol":"BTCUSD","changes":[["buy","27015.00","1.0"]]}
+{"type":"l2_updates","symbol":"BTCUSD","changes":[["buy","27001.00","4.0"],["sell","27011.00","5.0"]],"trades":[],"auction_events":[]}
+{"type":"l2_updates","symbol":"BTCUSD","changes":[["buy","27001.00","4.5"]]}

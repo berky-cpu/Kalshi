@@ -83,6 +83,7 @@ from .bitstamp import BitstampProcessor
 from .bybit import BybitOrderbookProcessor, BybitPublicTradeProcessor
 from .coinbase import CoinbaseProcessor
 from .coinbase_advanced import CoinbaseAdvancedProcessor
+from .gemini import GeminiL2Processor
 from .kalshi import KalshiProcessor
 from .kraken import KrakenProcessor
 from .writer import read_records
@@ -136,6 +137,8 @@ def make_processor(venue: str, channel: str) -> tuple[MessageProcessor | None, P
     v, c = venue.lower(), (channel or "").lower()
     if v == "coinbase_advanced":
         return CoinbaseAdvancedProcessor(channel=channel), None  # in-band l2_data snapshot
+    if v == "gemini":
+        return GeminiL2Processor(channel=channel), None  # in-band l2_updates snapshot (no seq)
     if v == "coinbase":
         return CoinbaseProcessor(channel=channel), _prime_coinbase
     if v == "kraken":
@@ -218,6 +221,13 @@ def _is_data_coinbase_advanced(raw: Any) -> bool:
     return isinstance(msg, dict) and msg.get("channel") == "l2_data"
 
 
+def _is_data_gemini(raw: Any) -> bool:
+    # Book updates (``l2_updates``) and the trade tape (``trade``) are data; ``heartbeat`` and acks
+    # are liveness/control (a heartbeat-only stream is the failure the watchdog must catch).
+    msg = as_dict(raw)
+    return isinstance(msg, dict) and msg.get("type") in {"l2_updates", "trade"}
+
+
 def _is_data_bitstamp(raw: Any) -> bool:
     msg = as_dict(raw)
     return (isinstance(msg, dict)
@@ -253,6 +263,7 @@ def _is_data_kalshi(raw: Any) -> bool:
 _DATA_CLASSIFIERS: dict[str, Callable[[Any], bool]] = {
     "coinbase": _is_data_coinbase,
     "coinbase_advanced": _is_data_coinbase_advanced,
+    "gemini": _is_data_gemini,
     "bitstamp": _is_data_bitstamp,
     "binance": _is_data_binance,
     "bybit": _is_data_bybit,

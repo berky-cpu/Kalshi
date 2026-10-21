@@ -61,6 +61,10 @@ def _is_recorded_complete_snapshot(venue: str, msg: Any) -> bool:
             isinstance(e, dict) and e.get("type") == "snapshot"
             for e in (msg.get("events") or [])
         )
+    if v == "gemini":
+        # v2 l2 has no ``type:"snapshot"`` marker; the snapshot is the ONLY ``l2_updates`` that also
+        # carries ``trades``/``auction_events`` (VERIFIED on the wire). Mirrors the processor.
+        return msg.get("type") == "l2_updates" and ("trades" in msg or "auction_events" in msg)
     return False
 
 

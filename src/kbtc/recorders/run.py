@@ -45,7 +45,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from . import binance, bitstamp, bybit, coinbase, coinbase_advanced, kalshi, kraken
+from . import binance, bitstamp, bybit, coinbase, coinbase_advanced, gemini, kalshi, kraken
 from . import kalshi_dynamic
 from . import resync as resync_mod
 from .base import IoConfig, MessageProcessor, logger, run_recorder
@@ -264,6 +264,15 @@ def _build_coinbase_advanced(name: str, env: Mapping[str, str], root: str, **_: 
     return BuiltFeed(name, "coinbase_advanced", "level2", cfg, [proc], rb, root)
 
 
+def _build_gemini(name: str, env: Mapping[str, str], root: str, **_: Any) -> BuiltFeed:
+    # Public v2 marketdata l2 (no auth). Writer path: gemini/l2_btcusd. In-band resync
+    # (resubscribe → fresh snapshot). BRTI constituent.
+    cfg = gemini.io_config()
+    proc = gemini.GeminiL2Processor()
+    rb = resync_mod.gemini_resync_builder()
+    return BuiltFeed(name, "gemini", "l2_btcusd", cfg, [proc], rb, root)
+
+
 def _build_kalshi(name: str, env: Mapping[str, str], root: str, *,
                   signer_factory: SignerFactory | None = None,
                   kalshi_fetch: Fetcher | None = None, **_: Any) -> BuiltFeed:
@@ -396,6 +405,11 @@ FEEDS: dict[str, FeedDef] = {
         (),  # public retail Advanced Trade feed — no credentials
         lambda env, root, **kw: _build_coinbase_advanced(
             "coinbase-advanced-level2", env, root, **kw),
+    ),
+    "gemini-l2": FeedDef(
+        "gemini-l2",
+        (),  # public v2 marketdata feed — no credentials
+        lambda env, root, **kw: _build_gemini("gemini-l2", env, root, **kw),
     ),
     "kalshi": FeedDef(
         "kalshi",

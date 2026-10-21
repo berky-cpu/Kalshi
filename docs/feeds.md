@@ -424,6 +424,70 @@ max-connections / message-rate limits not recorded here (not load-bearing for a 
 
 ---
 
+## 5B. Gemini v2 `marketdata` `l2` (BRTI constituent) — BTCUSD
+
+> **Doc note.** VERIFIED from the primary Gemini doc `https://developer.gemini.com/websocket/archived/v2`
+> (the v2 `marketdata` page; read 2026-10-21) AND confirmed on the live wire by a brief read-only
+> probe (`wss://api.gemini.com/v2/marketdata`, BTCUSD, 2026-10-20). **Gemini tags this page *Archived*
+> ("These APIs have been replaced by the new WebSocket API")** — but the v2 endpoint is **STILL LIVE**
+> (the probe connected and streamed). This is a standing deprecation RISK (see §7 F-10). An L2
+> **price-level** feed (price→qty), not order-by-order.
+
+**Endpoint (VERIFIED):** `wss://api.gemini.com/v2/marketdata` — **PUBLIC market data, no auth.**
+
+**Subscribe (VERIFIED), one frame:**
+```json
+{"type":"subscribe","subscriptions":[{"name":"l2","symbols":["BTCUSD"]}]}
+```
+Unsubscribe mirrors it with `"type":"unsubscribe"`.
+
+**Messages (VERIFIED on the wire):** the book is carried entirely by `type:"l2_updates"`:
+- **Initial / reseed SNAPSHOT** — `{"type":"l2_updates","symbol":"BTCUSD","changes":[[side,price,qty],...],
+  "trades":[...],"auction_events":[...]}`. `changes` is the FULL book, both sides (~4,563 levels on BTCUSD,
+  ~200 KiB). It is the ONLY `l2_updates` that ALSO carries `trades` and `auction_events`.
+- **Incremental DELTA** — `{"type":"l2_updates","symbol":"BTCUSD","changes":[[side,price,qty]]}` with ONLY
+  `changes` (keys `[changes,symbol,type]`; NEVER `trades`/`auction_events`, confirmed over many samples).
+- `side` = `"buy"`→bid / `"sell"`→ask; `qty` is the FULL size at the level (absolute SET, not a delta);
+  `"0"`/`"0.0"` REMOVES the level. Prices/qtys kept `Decimal` from the exact transmitted strings.
+- **Trades** arrive separately as `type:"trade"` (fields `symbol`,`price`,`quantity`,`side` (taker buy/sell),
+  `tid`,`event_id`,`timestamp` ms); the snapshot's `trades` array is the last-50 BACKFILL.
+- **Heartbeats**: the server pushes `type:"heartbeat"` frames; with the websockets library's protocol ping
+  that keeps the socket alive (no client app-ping needed).
+
+**Book model:** price-level (`PriceLevelBook`). `max_size=None` so the full-book snapshot frame is never
+size-rejected (trusted feed).
+
+**Gap detection (VERIFIED — the critical subtlety):** the v2 `l2` feed carries **NO sequence number and NO
+ordering/gap field of any kind** (the probe found no `seq`/`socket_sequence`/`event_id` on any l2 message). A
+dropped message is therefore NOT detectable by sequence the way Coinbase/Binance/Bitstamp are. We detect
+divergence by the only in-band signal available — a **STRICTLY crossed book** (`best_bid > best_ask`, which on a
+venue that never rests a bid above an ask can only mean a MISSED level-removal) — logged once (never silent) and
+suppressed thereafter until a snapshot re-anchors (no gap storm). **This is best-effort / PARTIAL:** a missed
+update that does not cross the book is undetectable in-band and is only corrected at the next reseed. We do NOT
+invent a sequence field. Primary integrity = **reconnect = reseed** + the staleness watchdog.
+
+**Snapshot vs delta (no `type:"snapshot"` marker):** a snapshot is identified by its SIGNATURE — an
+`l2_updates` that also carries `trades` (or `auction_events`). This is Gemini's analogue of Bybit's
+`type=="snapshot"` reset: a snapshot CLEARS + rebuilds; a delta SETS single levels. Because a delta never
+carries `trades`, a stale pre-resync delta can never be mistaken for the rebuild snapshot (closes the in-band
+resync race). A mid-stream snapshot while already synced is a reconnect reseed → rebuild SILENTLY (the
+disconnect is logged by the IO layer; the crossed-book gap, if any, is logged here — the reset itself is not a
+new gap).
+
+**Resync (in-band, like Bybit / Coinbase-Advanced — no REST):** on a crossed-book gap, resubscribe (unsubscribe
++ subscribe `l2`) → Gemini re-pushes a fresh snapshot that rebuilds the book and clears the flags. While
+awaiting it, deltas are dropped without re-arming resync. `resync_on_connect=False` (the initial subscribe
+already yields the reseed snapshot).
+
+**Writer path:** `gemini/l2_btcusd`. Feed name `gemini-l2`, `required_env=()`.
+
+**Status: VERIFIED** (endpoint LIVE, public/no-auth, subscribe envelope, `l2_updates` snapshot/delta schema,
+NO-sequence-number finding, `trades`/`auction_events` snapshot signature, trade + heartbeat shapes — all on the
+wire 2026-10-20). **PARTIAL/RISK:** archived/deprecated page (F-10); connection/rate limits not recorded;
+crossed-book is a best-effort detector.
+
+---
+
 ## 6. Cross-venue summary table
 
 | Venue | BRTI? | Endpoint (prod) | Auth | Gap-detection field | Snapshot / resync | Status |
@@ -434,6 +498,7 @@ max-connections / message-rate limits not recorded here (not load-bearing for a 
 | **Bitstamp** `live_orders_{pair}` | constituent | `wss://ws.bitstamp.net` | public (market data) | **`pre_event_id` → `event_id` chain** (`microtimestamp` secondary) | REST order book seed; `POST /api/v2/order_data/` `since_id` replay | VERIFIED |
 | **Binance** USDⓈ-M `@depth`+`@aggTrade` | lead signal | `wss://fstream.binance.com` | public | **`pu`** (`pu == prev.u`) | REST `fapi/v1/depth?limit=1000` → `lastUpdateId`; `U≤id≤u` align; `pu` chain | VERIFIED resync/`pu` (stream speeds + field example + trades/limits PARTIAL) |
 | **Bybit** v5 linear `orderbook`+`publicTrade` | lead signal | `wss://stream.bybit.com/v5/public/linear` | public | **`type=="snapshot"`** reset (`u`/`seq` monotonic) | reset book on every `snapshot`; reconnect → snapshot | VERIFIED incl. trades (numeric-gap rule PARTIAL) |
+| **Gemini** v2 `marketdata` `l2` (BTCUSD) | constituent | `wss://api.gemini.com/v2/marketdata` | **public** | **NONE (no seq field exists)** — best-effort crossed-book (`bid>ask`) + reconnect-reseed | `trades`/`auction_events`-bearing `l2_updates` = snapshot resets; in-band resubscribe → fresh snapshot | VERIFIED 2026-10-21 doc + 2026-10-20 wire (page *Archived* F-10; crossed-book PARTIAL) |
 
 ---
 
@@ -450,6 +515,8 @@ max-connections / message-rate limits not recorded here (not load-bearing for a 
 | F-7 | **Bybit `publicTrade` field schema** — RESOLVED, now VERIFIED from the v5 public trade page. | VERIFIED | — (closed) |
 | F-8 | **Coinbase 2023-07-01 auth-requirement date** corroborated only by a secondary (Tardis) notice; the channels page confirms auth *is* required but not the date. | PARTIAL | Coinbase changelog / announcement. |
 | F-9 | **Binance diff-depth stream speeds + U/u/pu field example** — from a search excerpt; the diff-depth page body did not render. (The `pu`-chaining resync algorithm is VERIFIED separately from the How-to-manage page.) | PARTIAL | Render/fetch the Binance USDⓈ-M Diff-Book-Depth page body. |
+| F-10 | **Gemini v2 `marketdata` is tagged *Archived* / deprecated** ("replaced by the new WebSocket API"). The v2 endpoint `wss://api.gemini.com/v2/marketdata` is STILL LIVE (probed 2026-10-20) and is what we build on, but Gemini could retire it. The new API (`wss://ws.gemini.com`, `L2 Partial/Differential Depth` streams, `SUBSCRIBE`/`UNSUBSCRIBE`) has a DIFFERENT schema we have not verified. | RISK (endpoint live) | Monitor for v2 retirement; if retired, port to the new WebSocket API (new feeds.md section + re-verify schema incl. whether it has a sequence number). |
+| F-11 | **Gemini v2 `l2` has NO sequence/ordering field (VERIFIED absence).** Gap detection is best-effort (crossed-book) + reconnect-reseed; a non-crossing missed update is undetectable in-band until the next reseed. | PARTIAL (by venue design) | Nothing in-feed can close it (no seq exists). Mitigate with periodic reseeds; quantify any drift against the BRTI replica / other constituents in a tracking study. |
 
 ---
 
@@ -474,6 +541,8 @@ max-connections / message-rate limits not recorded here (not load-bearing for a 
 | Bybit — v5 public orderbook | `https://bybit-exchange.github.io/docs/v5/websocket/public/orderbook` | v5; read 2026-10-16 | VERIFIED |
 | Bybit — v5 WS connect (endpoint, subscribe, heartbeat, limits) | `https://bybit-exchange.github.io/docs/v5/ws/connect` | v5; read 2026-10-16 | VERIFIED |
 | Bybit — v5 public trade | `https://bybit-exchange.github.io/docs/v5/websocket/public/trade` | v5; read 2026-10-16 | VERIFIED |
+| Gemini — v2 `marketdata` (`l2` subscribe + `l2_updates`/`trade` schema) | `https://developer.gemini.com/websocket/archived/v2` (`.md` served clean markdown; `docs.gemini.com/websocket-api/#market-data-version-2` 301→here) | *Archived*; read 2026-10-21 | VERIFIED (endpoint, subscribe, l2_updates snapshot/delta, trade shape; NO seq field — confirmed by live wire) |
+| Gemini — **live read-only wire probe** (local, BTCUSD): message shapes + absence of any seq field | `wss://api.gemini.com/v2/marketdata` (public; connect→subscribe→~40 frames→disconnect) | captured 2026-10-20 | VERIFIED — snapshot keys `[auction_events,changes,symbol,trades,type]` (full both-sides book ~4,563 levels); delta keys `[changes,symbol,type]` only; `heartbeat` present; NO `seq`/`socket_sequence`/`event_id` on any l2 message |
 | Kalshi — WebSocket **orderbook updates** (orderbook_snapshot/delta schema) | `https://docs.kalshi.com/websockets/orderbook-updates` | read 2026-10-17 | VERIFIED (envelope `type`/`sid`/`seq`; snapshot `yes_dollars_fp`/`no_dollars_fp` `[price_dollars,count_fp]` string pairs; delta `price_dollars`+SIGNED `delta_fp`+`side` yes/no) |
 | Kalshi — **live authed WS capture** (box, KXBTC15M, 2026-10-17): orderbook + TRADE schema, msg-wrapper, seq reset | live wire (authed; reads only) | captured 2026-10-17 | VERIFIED — payload NESTED under `msg`; `seq` per-sid resets to 1 on reconnect; **trade** msg = `trade_id`/`yes_price_dollars`/`no_price_dollars`/`count_fp`/`taker_side`/`taker_outcome_side`/`taker_book_side`/`is_block_trade`/`ts`/`ts_ms`. Connection STABLE (10,113 frames/22 s, 0 crashes) — earlier "4 s keepalive drop" was a misdiagnosed `KeyError` reconnect, now fixed. unsubscribe-`sids` still INFERRED |
 | Kalshi — **WebSocket connection** (`update_subscription` dynamic add/remove markets, limits) | `https://docs.kalshi.com/websockets/websocket-connection` | read 2026-10-17 | VERIFIED — `{"id":N,"cmd":"update_subscription","params":{"sids":[sid],"market_tickers":[...],"action":"add_markets"\|"delete_markets"\|"get_snapshot"}}` edits a LIVE subscription without reconnect (same sid); `sids` = one-element array; per-sub market-limit = error **26**, command rate-limit = error **27** (limit values undocumented); max **5** concurrent WS per user |
