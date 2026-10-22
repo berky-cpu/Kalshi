@@ -24,6 +24,23 @@ this session is flagged, with the exact URL that failed, in the "Open / UNVERIFI
 > Kraken token) is used solely to *subscribe*; no order path exists in a recorder. Credentials
 > come only from environment variables — never logged, printed, or committed.
 
+**Shared connection robustness (ALL venues).** The shared connect core (`base.run_recorder`) sets
+the WebSocket protocol-level keepalive **explicitly** on every connection —
+`ping_interval=20 s`, `ping_timeout=20 s`, `close_timeout=10 s` (`IoConfig.ws_ping_interval_s` /
+`ws_ping_timeout_s` / `ws_close_timeout_s`). This is the TCP dead-peer detector and is DISTINCT
+from any venue's application-level JSON ping (`ping_message` / `ping_interval_s`): the library
+sends an RFC 6455 PING each interval and, getting no PONG, fails the connection with
+`ConnectionClosed`, so a **half-closed peer** (server FIN → our socket stuck in `CLOSE-WAIT`) or a
+silently-dropped idle TCP is detected within ~40 s and the existing reconnect+rediscover path runs.
+The values equal the websockets-library defaults, so this changed no venue's behaviour — it only
+removes the silent dependency on the library's *implicit* default (which drifts across versions /
+between the legacy and asyncio APIs). As a transport-independent backstop, the data-staleness
+watchdog (`DataStalenessMonitor`, 120 s crypto / 300 s Kalshi) force-reconnects any feed that stays
+connected but delivers no DATA frame; its force-close is bounded and hard-aborts a stalled graceful
+close so the self-heal can never itself hang on the dead peer. (Incident **2026-10-22**: a Kalshi
+connection sat in `CLOSE-WAIT` for ~50 min with no reconnect during a 0-open-markets maintenance
+window — these two independent safeguards close that gap.)
+
 ---
 
 ## 1. Coinbase Exchange (BRTI constituent) — `full` and `level3` channels

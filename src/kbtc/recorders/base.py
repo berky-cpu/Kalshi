@@ -580,6 +580,53 @@ class IoConfig:
     # silence is unambiguously broken). ``None`` disables. Overridden per feed in run.py where a
     # feed can be legitimately quieter (Kalshi). Chosen so it CANNOT false-trip a healthy feed.
     stale_timeout_s: float | None = 120.0
+    # WebSocket PROTOCOL-level keepalive — passed straight to ``websockets.connect`` and DISTINCT
+    # from the application-level ``ping_message``/``ping_interval_s`` above (that sends a venue JSON
+    # ping; this is the RFC6455 PING/PONG the library drives). This is the TCP-dead-peer detector:
+    # with it set, a half-closed connection (server FIN → our socket stuck in CLOSE-WAIT) or a
+    # silently-dropped idle TCP is detected within ~``ws_ping_interval_s + ws_ping_timeout_s`` — the
+    # library sends a PING every interval and, getting no PONG, fails the connection with
+    # ``ConnectionClosed``, which unblocks the read loop so the EXISTING reconnect+rediscover path
+    # runs. (Incident 2026-10-22: a Kalshi connection sat in CLOSE-WAIT for ~50 min with no
+    # reconnect.) The defaults EQUAL the websockets-library defaults (20/20/10), so making them
+    # explicit here changes NO venue's behaviour — it only removes the silent dependency on the
+    # library's implicit default (which can drift across versions or between the legacy and asyncio
+    # APIs) and makes the dead-peer detection a tested, documented guarantee rather than an accident
+    # of the installed library version. Safe for EVERY venue: a healthy idle peer answers the PING
+    # with a PONG so the keepalive keeps the connection UP (no reconnect storm during a quiet
+    # market-closed window); only a genuinely dead/half-closed peer trips it. Venues that ALSO run an
+    # app-level ping (kraken/bybit/bullish) are unaffected — the two pings are orthogonal. Set
+    # ``ws_ping_interval_s=None`` ONLY for a feed that must never be pinged (none today); never do
+    # this for a venue that can half-close silently.
+    ws_ping_interval_s: float | None = 20.0
+    ws_ping_timeout_s: float | None = 20.0
+    ws_close_timeout_s: float | None = 10.0
+
+
+async def _force_close_ws(ws: Any, close_timeout_s: float | None) -> None:
+    """Tear a (possibly half-dead) socket down so the blocked read loop raises and reconnects.
+
+    The data-staleness watchdog calls this to force a reconnect on a "connected but no data" stall.
+    A graceful ``ws.close()`` performs the WebSocket closing handshake and can STALL on a half-dead
+    peer (the peer FIN'd and will never send its close frame), so we bound it with ``wait_for`` and,
+    if it overruns (or raises), hard-``abort()`` the transport. Either way the connection ends and
+    the outer loop reconnects — the self-heal can never itself hang on the dead peer it is healing.
+
+    Unit-tested directly (``run_recorder`` is live-only / pragma-no-cover): a fake ws whose
+    ``close()`` hangs must still get its transport aborted within the bound.
+    """
+    import asyncio
+
+    bound = (close_timeout_s if close_timeout_s is not None else 10.0) + 0.5
+    try:
+        await asyncio.wait_for(ws.close(), timeout=bound)
+    except Exception:  # noqa: BLE001 - timeout OR a close error: force the socket down regardless
+        transport = getattr(ws, "transport", None)
+        if transport is not None:
+            try:
+                transport.abort()
+            except Exception:  # pragma: no cover - defensive; abort is best-effort
+                pass
 
 
 async def run_recorder(  # pragma: no cover - requires a live socket
@@ -631,6 +678,12 @@ async def run_recorder(  # pragma: no cover - requires a live socket
             async with websockets.connect(
                 url, open_timeout=config.open_timeout_s, additional_headers=headers,
                 max_size=config.max_size,
+                # Protocol-level keepalive (see IoConfig): detect a dead/half-closed peer and raise
+                # ConnectionClosed so the reconnect loop runs. Explicit so it never depends on the
+                # library's implicit default. Equal to the library defaults, so behaviour-preserving.
+                ping_interval=config.ws_ping_interval_s,
+                ping_timeout=config.ws_ping_timeout_s,
+                close_timeout=config.ws_close_timeout_s,
             ) as ws:
                 # Fresh subscribe per connect when a short-lived token is embedded (Kraken);
                 # otherwise the static list. Never logged.
@@ -690,7 +743,9 @@ async def run_recorder(  # pragma: no cover - requires a live socket
                                        "channel": config.channel,
                                        "stale_timeout_s": config.stale_timeout_s},
                             )
-                            await ws.close()  # unblocks the read loop → outer loop reconnects
+                            # Force the socket down (bounded; hard-abort if the graceful close
+                            # stalls on the half-dead peer) → unblocks the read loop → reconnect.
+                            await _force_close_ws(ws, config.ws_close_timeout_s)
                             return
 
                 # F3: create the heartbeat/watchdog and launch the per-connect background tasks
