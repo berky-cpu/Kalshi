@@ -263,3 +263,204 @@ def test_resync_on_gap_flag_controls_needs_resnapshot():
     tp = TapeProc("p", "c")
     tp._emit_gap("x", 1)
     assert tp.needs_resnapshot is False and len(tp.gaps) == 1
+
+
+# --------------------------------------------------------------------------------------
+# Connection-robustness: keepalive detection of a dead/half-closed peer + self-heal force-close.
+# Regression guard for the 2026-10-22 incident (Kalshi socket stuck in CLOSE-WAIT ~50 min, no
+# reconnect). run_recorder is live-only (# pragma: no cover); we drive it with a fake
+# ``websockets.connect`` exactly as test_run_recorder_passes_max_size_into_connect does.
+# --------------------------------------------------------------------------------------
+def test_ioconfig_ws_keepalive_defaults_match_library():
+    """Explicit protocol-keepalive defaults equal the websockets-library defaults, so making them
+    explicit changes no venue's behaviour — it only removes the implicit-default dependency."""
+    from kbtc.recorders.base import IoConfig
+
+    cfg = IoConfig(venue="v", channel="c", urls=["wss://x"], subscribe_messages=[])
+    assert cfg.ws_ping_interval_s == 20.0
+    assert cfg.ws_ping_timeout_s == 20.0
+    assert cfg.ws_close_timeout_s == 10.0
+
+
+def test_run_recorder_forwards_ws_keepalive_to_connect(monkeypatch):
+    """The shared connect path MUST pass ping_interval/ping_timeout/close_timeout so a dead peer
+    raises ConnectionClosed (the fix for the silent CLOSE-WAIT stall)."""
+    import asyncio
+
+    import websockets
+
+    from kbtc.recorders.base import IoConfig, run_recorder
+
+    captured: dict = {}
+
+    def fake_connect(url, **kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("stop after recording connect kwargs")
+
+    monkeypatch.setattr(websockets, "connect", fake_connect)
+
+    async def drive():
+        cfg = IoConfig(venue="kalshi", channel="market", urls=["wss://x"], subscribe_messages=[],
+                       ws_ping_interval_s=15.0, ws_ping_timeout_s=12.0, ws_close_timeout_s=8.0)
+        stop = asyncio.Event()
+
+        async def runner():
+            await run_recorder(cfg, [], writer=object(), resync_builder=lambda send: None,
+                               backoff=BackoffPolicy(base_s=0, factor=1, max_s=0, jitter=0),
+                               stop_event=stop)
+
+        task = asyncio.create_task(runner())
+        await asyncio.sleep(0)
+        stop.set()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(drive())
+    assert captured["ping_interval"] == 15.0
+    assert captured["ping_timeout"] == 12.0
+    assert captured["close_timeout"] == 8.0
+
+
+class _FakeWs:
+    """Minimal async-context-manager stand-in for a websockets connection."""
+
+    def __init__(self, frames, raise_at_end):
+        self._frames = list(frames)
+        self._raise_at_end = raise_at_end
+        self.sent: list = []
+        self.closed = False
+        self.transport = None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def send(self, msg):
+        self.sent.append(msg)
+
+    async def close(self):
+        self.closed = True
+
+    def __aiter__(self):
+        import websockets
+
+        async def _gen():
+            for f in self._frames:
+                yield f
+            if self._raise_at_end:
+                # Simulate the library's keepalive detecting a dead/half-closed peer.
+                raise websockets.exceptions.ConnectionClosedError(None, None)
+
+        return _gen()
+
+
+def test_run_recorder_reconnects_and_rediscovers_after_connection_closed(monkeypatch):
+    """A dropped/half-closed connection (ConnectionClosed) must drive the reconnect+rediscover path:
+    a fresh connect, a fresh subscribe_factory discovery, and a relaunched on_connect poller."""
+    import asyncio
+    import json
+
+    import websockets
+
+    from kbtc.recorders.base import IoConfig, run_recorder
+
+    stop = asyncio.Event()
+    conns: list[_FakeWs] = []
+    discovery_calls: list[int] = []
+    poller_launches: list[int] = []
+
+    def subscribe_factory():
+        discovery_calls.append(1)
+        return [{"sub": len(discovery_calls)}]  # distinct per (re)connect → proves re-discovery
+
+    def on_connect(send, procs, stop_event):
+        poller_launches.append(1)
+        return []
+
+    def fake_connect(url, **kwargs):
+        # 1st connect: raise ConnectionClosed to force a reconnect. 2nd connect: clean, then stop.
+        first = len(conns) == 0
+        ws = _FakeWs(frames=[], raise_at_end=first)
+        conns.append(ws)
+        if not first:
+            stop.set()  # let the 2nd connection subscribe + launch the poller, then exit the loop
+        return ws
+
+    monkeypatch.setattr(websockets, "connect", fake_connect)
+
+    cfg = IoConfig(venue="kalshi", channel="market", urls=["wss://x"], subscribe_messages=[],
+                   stale_timeout_s=None)  # watchdog irrelevant here; isolate the reconnect path
+    cfg.subscribe_factory = subscribe_factory
+
+    async def drive():
+        await run_recorder(cfg, [], writer=object(),
+                           resync_builder=lambda send: None,
+                           backoff=BackoffPolicy(base_s=0, factor=1, max_s=0, jitter=0),
+                           stop_event=stop, on_connect=on_connect)
+
+    asyncio.run(asyncio.wait_for(drive(), timeout=5.0))
+
+    assert len(conns) == 2, "a ConnectionClosed on the first connect must trigger a reconnect"
+    assert len(discovery_calls) == 2, "subscribe_factory must re-discover on the reconnect"
+    assert len(poller_launches) == 2, "on_connect poller must be relaunched on the reconnect"
+    # Each connection re-subscribed with its own freshly-discovered payload.
+    assert conns[0].sent == [json.dumps({"sub": 1})]
+    assert conns[1].sent == [json.dumps({"sub": 2})]
+
+
+def test_force_close_ws_aborts_transport_on_hung_close():
+    """The self-heal must not itself hang on a half-dead peer: if the graceful close stalls, the
+    transport is hard-aborted within the bound so the read loop unblocks and reconnects."""
+    import asyncio
+
+    from kbtc.recorders.base import _force_close_ws
+
+    class _HungTransport:
+        def __init__(self):
+            self.aborted = False
+
+        def abort(self):
+            self.aborted = True
+
+    class _HungWs:
+        def __init__(self):
+            self.transport = _HungTransport()
+
+        async def close(self):
+            await asyncio.sleep(3600)  # never completes — the stalled closing handshake
+
+    ws = _HungWs()
+    asyncio.run(_force_close_ws(ws, close_timeout_s=0.05))
+    assert ws.transport.aborted is True
+
+
+def test_force_close_ws_graceful_close_does_not_abort():
+    """When the peer closes cleanly within the bound, no hard abort is needed."""
+    import asyncio
+
+    from kbtc.recorders.base import _force_close_ws
+
+    class _Transport:
+        def __init__(self):
+            self.aborted = False
+
+        def abort(self):
+            self.aborted = True
+
+    class _Ws:
+        def __init__(self):
+            self.transport = _Transport()
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    ws = _Ws()
+    asyncio.run(_force_close_ws(ws, close_timeout_s=5.0))
+    assert ws.closed is True
+    assert ws.transport.aborted is False
