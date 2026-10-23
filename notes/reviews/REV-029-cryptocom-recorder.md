@@ -36,7 +36,22 @@
 
 ## Findings (by severity)
 
-### F1 — MEDIUM (verify before relying on depth/mid) — depth-50 window eviction is UNVERIFIED, undetectable
+### F1 — CLOSED (2026-10-23, option 1: trim-to-depth safeguard) — depth-50 window eviction
+
+**Resolution (2026-10-23):** fixed via REV-029's recommended option 1 — trim each side back to the
+subscribed depth (`self.depth`=`DEPTH`=50, a named constant) after EVERY apply (snapshot seed AND
+delta). New `PriceLevelBook.trim(side, n)` (base.py) slices the far end of the `SortedDict` (O(k)
+evicted, Decimal-preserving); `CryptoComL2Processor._trim_to_window` calls it from the shared
+`_reset_from_snapshot`/`_apply_update` path, so the LIVE book and the offline `normalize` (which
+reuses the processor) reconstruct identically. Can never drop real liquidity (the venue sends ≤50
+levels). Tests added to `tests/test_recorders_cryptocom.py`: ghost-eviction reproduction (bid up-move
++ ask down-move, ≤depth, uncrossed top-of-book), in-window book untouched, best_bid/ask correct,
+shared-path live==normalize parity, plus a `PriceLevelBook.trim` unit test. `uv run pytest -q` →
+**404 passed** (was 400). Still owed before admitting to the BRTI replica: the tracking-error study
+(the Fix item 4 below — that was always a separate consume-gate, not part of the ghost bug itself).
+BUILD+TEST only; not deployed/committed (hands back to red-team → preliminary re-normalize).
+
+Original finding (MEDIUM — verify before relying on depth/mid) — depth-50 window eviction was UNVERIFIED, undetectable:
 `book.BTC_USD.50` is a depth-CAPPED feed. `PriceLevelBook` (base.py:183) has no `max_size`/trim, and
 `_apply_levels` (cryptocom.py:155) does an absolute SET with qty-0 removal only. If Crypto.com does NOT
 emit an explicit qty-0 remove when a level is pushed OUT of the top-50 window (e.g. price rises and the
@@ -91,7 +106,9 @@ During batch re-normalize, heartbeat replies accumulate on `self.outbound` (neve
 
 - F1 closed: either a trim-to-depth safeguard added, OR the venue's eviction semantics verified and
   recorded, PLUS a tracking-error study admitting the constituent — then PASS for consumption.
+  **UPDATE 2026-10-23: trim-to-depth safeguard added (F1 closed, see F1). Tracking-error study still
+  owed before consumption.**
 
-## Must-fix-before-RELYING-on-feed (consumption): F1.
+## Must-fix-before-RELYING-on-feed (consumption): ~~F1~~ CLOSED 2026-10-23; remaining: tracking-error study only.
 ## Monitor-after-deploy: F2 (heartbeat echo actually works on the box), F3.
 ## Deploy as additive capture: approved now.

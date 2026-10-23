@@ -236,6 +236,34 @@ class PriceLevelBook:
             sel = iter(keys if n is None else keys[:n])
         return [(p, d[p]) for p in sel]
 
+    def trim(self, side: str, n: int) -> None:
+        """Keep only the top-``n`` levels on ``side`` (best-first), evicting the rest.
+
+        For a DEPTH-CAPPED venue feed (e.g. Crypto.com ``book.BTC_USD.50``) the venue only ever
+        transmits its top-``n`` by price; a level pushed OUT of that window (a bid that drops below
+        rank-``n`` after an uptick, say) arrives as NO event — it is simply absent, not a qty-0
+        remove — so an absolute-SET book keeps it as a stale "ghost" until the next reseed, where it
+        can resurface as a false ``best_bid``/``best_ask`` (crossed book; REV-029 F1 / the
+        Bitstamp-reseed class). Trimming back to the venue's window after every apply evicts it.
+
+        Efficient: slices the FAR end off the maintained ``SortedDict`` — O(k) in the number
+        evicted, not a re-sort. A no-op when the side already holds ≤ ``n`` levels, so it can never
+        drop real in-window liquidity. ``n <= 0`` clears the side.
+        """
+        d = self._side(side)
+        excess = len(d) - n
+        if excess <= 0:
+            if n <= 0:
+                d.clear()
+            return
+        keys = d.keys()
+        # Drop the WORST levels (the far end): bids keep the highest prices (evict the lowest, the
+        # low end); asks keep the lowest prices (evict the highest, the high end). Materialise the
+        # slice before deleting — mutating a SortedDict invalidates its live key view.
+        drop = list(keys[:excess]) if side == BID else list(keys[-excess:])
+        for p in drop:
+            del d[p]
+
 
 @dataclass
 class Order:
