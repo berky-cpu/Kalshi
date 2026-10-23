@@ -542,16 +542,20 @@ connect via `subscribe_factory`; public — no credential). Unsubscribe mirrors 
   REMOVES it. `num_orders` is unused for an L2 price book. Prices/qtys kept `Decimal` from the exact
   strings.
 
-**Book model:** price-level (`PriceLevelBook`). NOTE (REV-029 F1): `PriceLevelBook` does **NOT**
-cap/trim its size — it holds every level ever SET until an explicit qty-0 removal. Crypto.com's
-`book.BTC_USD.50` is depth-capped at 50, so if the venue does **not** emit a qty-0 remove when a
-level is pushed out of the top-50 window, that level lingers as a stale "ghost" (the Bitstamp-reseed
-class, REV-026) until the next reseed — the `pu` chain can't detect it and the `cs` checksum is
-unused (F-12). **Consume-gate (not a recording gate):** before this feed is admitted to the BRTI
-replica/fair value, close F1 — trim each side to the top 50 by price after every apply (matches the
-venue window and evicts the ghost), OR verify+record that the venue sends removes for evicted levels
-— plus a tracking-error study. Safe to RECORD as-is (raw is complete; the fix is reconstruction-side,
-applies to already-recorded raw like the Bitstamp fix).
+**Book model:** price-level (`PriceLevelBook`). `book.BTC_USD.50` is depth-capped at 50, so if the
+venue does **not** emit a qty-0 remove when a level is pushed out of the top-50 window, that level
+would linger as a stale "ghost" (the Bitstamp-reseed class, REV-026) until the next reseed — the
+`pu` chain can't detect it and the `cs` checksum is unused (F-12). **REV-029 F1 — CLOSED
+(2026-10-23):** after **every** apply (snapshot seed AND delta), the processor trims each side back
+to `self.depth` (= the subscribed `DEPTH`=50, a named constant, not a magic number) via the new
+`PriceLevelBook.trim(side, n)` (efficient — slices the far end of the `SortedDict`, O(k) evicted,
+Decimal-preserving). This exactly matches the venue's window and evicts any ghost; because the venue
+never transmits more than 50 levels, the trim can never drop real in-window liquidity (verified: a
+≤50-level book is untouched). The trim lives in the **shared reconstruction path**
+(`CryptoComL2Processor._trim_to_window`, called from `_reset_from_snapshot` and `_apply_update`), so
+the LIVE processor book and the offline `normalize` reconstruct **identically** (the Bitstamp lesson:
+one reconstruction path — `normalize` reuses this processor via `make_processor`). Still owed before
+this constituent feeds fair value: a tracking-error study vs the other constituents (EXP-002 style).
 
 **Gap detection (VERIFIED — the real, documented mechanism):** deltas apply in strict order where
 **`pu` of the new message equals `u` of the previous message** (Binance-USDⓈ-M-futures-style chain).

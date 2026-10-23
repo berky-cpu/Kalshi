@@ -147,10 +147,31 @@ class CryptoComL2Processor(MessageProcessor):
         self.book.clear()
         self._apply_levels(d0.get("bids"), BID)
         self._apply_levels(d0.get("asks"), ASK)
+        self._trim_to_window()
 
     def _apply_update(self, update: dict) -> None:
         self._apply_levels(update.get("bids"), BID)
         self._apply_levels(update.get("asks"), ASK)
+        self._trim_to_window()
+
+    def _trim_to_window(self) -> None:
+        """Evict ghost levels that fell out of the venue's depth-capped window (REV-029 F1).
+
+        ``book.{INSTRUMENT}.{DEPTH}`` is depth-CAPPED: the venue only ever transmits its top-``DEPTH``
+        by price. A level pushed out of that window (e.g. an old rank-50 bid that becomes rank-51
+        after the market ticks up) arrives as NO event — it is simply absent, NOT a qty-0 remove —
+        and the pu-chain stays consistent, so the gap detector cannot catch it. Without a trim the
+        stale level LINGERS until the next reseed and can resurface as a false ``best_bid``/
+        ``best_ask`` (crossed book) — the Bitstamp-reseed ghost class.
+
+        Trimming each side back to ``self.depth`` (the SUBSCRIBED depth, not a magic number) after
+        EVERY apply — snapshot seed and delta alike — exactly matches the venue's window and drops
+        the ghost. The venue never sends more than ``self.depth`` levels, so this can never drop real
+        in-window liquidity. Called from the shared reconstruction path, so the LIVE processor book
+        and the offline normalize (which reuses this processor) stay bit-identical.
+        """
+        self.book.trim(BID, self.depth)
+        self.book.trim(ASK, self.depth)
 
     def _apply_levels(self, levels: Any, side: str) -> None:
         for lvl in levels or []:
