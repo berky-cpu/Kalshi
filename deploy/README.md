@@ -107,9 +107,13 @@ Enable one recorder instance per feed:
 
 ```bash
 for f in coinbase-full coinbase-level3 kraken-level3 bitstamp-live_orders \
-         binance-perp bybit-perp kalshi; do
+         binance-perp bybit-perp kalshi kalshi-cfbenchmarks; do
   sudo systemctl enable --now "kbtc-recorder@${f}"
 done
+# kalshi-cfbenchmarks records the Kalshi-relayed CF BRTI index value (1 Hz + 5 Hz) — the published
+# index + the forming settlement average. SEPARATE instance/connection from `kalshi`, isolated so
+# the index and market/orderbook recorders can't take each other down. Same auth; a SECOND
+# concurrent authed WS per key (within Kalshi's 5-concurrent cap). See docs/feeds.md §5E.
 ```
 
 Enable the periodic jobs (timers, not the services directly):

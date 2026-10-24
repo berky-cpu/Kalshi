@@ -60,6 +60,7 @@ from . import (
     cryptocom,
     gemini,
     kalshi,
+    kalshi_cfbenchmarks,
     kraken,
 )
 from .base import MessageProcessor, logger, now_ns
@@ -369,3 +370,26 @@ def kalshi_resync_builder(
         "Kalshi in-band resync disabled pending ROADMAP 1.1b sid-pruning"
     )
     return lambda send: disabled
+
+
+def kalshi_cfbenchmarks_resync_builder(
+    index_ids: tuple[str, ...] | list[str] | None = None,
+    channels: tuple[str, ...] | list[str] | None = None,
+) -> Callable[[WsSend], Resnapshot]:
+    """In-band resubscribe for the CF Benchmarks index-value streams.
+
+    Unlike the orderbook recorder (whose resync is DISABLED pending the UNVERIFIED sid-pruning
+    double-count hazard, see :func:`kalshi_resync_builder`), the cfbenchmarks channels are VALUE
+    streams with NO book and NO snapshot: a seq gap is just a few missed prints, and a resubscribe
+    simply re-establishes the stream — there is nothing to double-apply, so the book-corruption
+    risk that gates the orderbook resync does not exist here. On a gap the processor arms
+    ``needs_resnapshot`` and this pushes the same per-channel ``subscribe`` frames over the live
+    socket. ``resync_on_connect`` is False (the initial subscribe already opened the streams).
+
+    OPEN RISK (benign; UNVERIFIED): if a resubscribe opened a NEW ``sid`` while the old one stayed
+    alive, we would briefly double-RECEIVE value frames until the next natural reconnect. That
+    inflates volume but never corrupts anything (no book; raw is deduplicable offline by
+    ``source_ts_ms``). Documented in docs/feeds.md; self-heals on reconnect.
+    """
+    frames = kalshi_cfbenchmarks.subscribe_messages(index_ids, channels)
+    return lambda send: ResubscribeResyncer(frames, send)

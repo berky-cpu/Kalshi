@@ -278,6 +278,25 @@ no dedicated settlement subresource (`/markets/<t>/settlement` → 404). Code: `
 This independently corroborates the 0.1 up/down ≥-mechanic. `settlement.py` enforces this invariant **at capture**
 (a `result_inconsistent` issue is logged, not silently written, on any mismatch).
 
+### Live-observable forming settlement average (CF Benchmarks WS, ROADMAP 1.1)
+- **WIRE-VERIFIED 2026-10-24** (read-only authed prod probe, our key; primary doc
+  `https://docs.kalshi.com/websockets/cfbenchmarks-value` read 2026-10-24): Kalshi relays the CF
+  BRTI index value over WS on channels `cfbenchmarks_value` (1 Hz) and `cfbenchmarks_value_5hz`
+  (5 Hz), subscribe `{"channels":[...],"index_ids":["BRTI"]}`. The 1 Hz `msg` carries
+  `avg_60s_data` (trailing 60 s, always present) and — **only in the final minute before
+  :00/:15/:30/:45** — `last_60s_windowed_average_15min` {`value` 8dp, `window_size`→60,
+  `window_start_ts_ms`, `window_end_ts_exclusive`}, the window `(close-60s, close]` (60 samples).
+  This is the **forming settlement average** observable live, now recorded by the
+  `kalshi-cfbenchmarks` feed (`src/kbtc/recorders/kalshi_cfbenchmarks.py`; writer path
+  `kalshi/cfbenchmarks`). Full schema + source table in `docs/feeds.md` §5E.
+- **UNVERIFIED (F-19):** whether KXBTC15M settles off EXACTLY `last_60s_windowed_average_15min`.
+  The field IS the 60 s close-window average on the wire, but its identity as the authoritative
+  settlement value and the exact endpoint placement remain the open 0.1/0.3 question — to be closed
+  by contract-terms wording + regressing this recorded field vs published `expiration_value`
+  settlements (now directly capturable).
+- **UNVERIFIED (F-18):** `avg_60s_data.window_size` observed **0** on normal 1 Hz frames despite a
+  non-trivial average; recorded verbatim, not interpreted.
+
 ### Verification notes
 - Ticker-specific values (open/close examples) are from the 2026-10-18 session markets live at fetch
   time (2026-10-16); the structural facts (window, source, tick, 15-min frequency, up/down mechanic)
