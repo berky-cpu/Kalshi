@@ -76,10 +76,11 @@ BOOK_SCHEMA: dict[str, pl.DataType] = {
 
 # ---------------------------------------------------------------------------------------
 # kalshi_books  (Kalshi yes/no order book — SAME row shape as books but different UNITS:
-# price is INTEGER CENTS (0..100), size is CONTRACT COUNT. ``side`` is the Kalshi side token
-# ("yes"/"no", or "bid"/"ask" on perps) as received — NOT a crypto bid/ask. Schema is flagged
-# UNVERIFIED per ROADMAP 1.1b: the KXBTC15M orderbook payload and seq semantics are not yet
-# confirmed against the official channel reference, so we normalize exactly what we record.)
+# price is in DOLLARS (0..1, e.g. 0.0800 == 8c; the recorder parses the VERIFIED dollar-string
+# fields yes_dollars_fp/no_dollars_fp, so it is NOT integer cents 0..100), size is CONTRACT COUNT.
+# ``side`` is the Kalshi side token ("yes"/"no", or "bid"/"ask" on perps) as received — NOT a crypto
+# bid/ask. (REV-036 F2: this comment previously said "integer cents 0..100", which was stale/wrong
+# — the recorded data is dollars in [0,1]; spot-checked.)
 # ---------------------------------------------------------------------------------------
 KALSHI_BOOK_SCHEMA = dict(BOOK_SCHEMA)
 
