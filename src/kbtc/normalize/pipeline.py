@@ -356,7 +356,9 @@ def stream_kalshi(channel: str, records: Iterable[Record]) -> Iterator[tuple[str
 def _kalshi_levels(book: dict) -> list[tuple[str, int, Decimal, Decimal]]:
     """Each side's price→size map → best-first (price descending) ``(side, level, price, size)``.
 
-    Prices/sizes are int cents / contract counts from the processor; coerced to Decimal (exact).
+    Prices are DOLLARS in [0,1] (the processor parses the VERIFIED dollar-string fields, e.g. 0.0800,
+    NOT integer cents 0..100 — REV-036 F2 comment fix); sizes are contract counts; coerced to Decimal
+    (exact).
     """
     out: list[tuple[str, int, Decimal, Decimal]] = []
     for side in sorted(book.keys()):

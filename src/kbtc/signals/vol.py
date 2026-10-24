@@ -1017,7 +1017,12 @@ def settlement_z2_test(
     variance). Var_forecast[A] = ``pricing.settlement_moments(ln Y_t, τ, σ̂_t, n_observed=0).var``
     (all 60 settlement samples in the future). z = a(t,τ)/sqrt(Var). Returns a :class:`Z2Result` per
     horizon. Causal: Y_t and σ̂_t are as-of t; A is realized after.
+
+    ``seasonality`` is accepted but intentionally UNUSED: ``var_path.var_per_s`` is already the
+    re-seasonalized per-second variance, so re-applying the seasonal factor here would double-count
+    it. The parameter is retained only for call-site symmetry with the rest of the module (REV-035).
     """
+    _ = seasonality  # see docstring: var_path is already re-seasonalized; do NOT re-apply.
     window = window or SettlementWindow()
     origins_ns = np.asarray(origins_ns, dtype=np.int64)
     out: dict[float, Z2Result] = {}
@@ -1026,8 +1031,11 @@ def settlement_z2_test(
         per_day: dict[str, list[float]] = {}
         zs: list[float] = []
         for t0 in origins_ns:
-            gi = int(np.searchsorted(var_path.grid_ns, t0, side="left"))
-            if gi >= var_path.grid_ns.size:
+            # Causal as-of read: LAST grid point <= t0 (side="right"-1), never the first grid point
+            # AFTER an off-grid origin (which would leak up to step_s of future into σ̂). For a
+            # grid-aligned origin this is the exact index (REV-035 caveat 1).
+            gi = int(np.searchsorted(var_path.grid_ns, t0, side="right")) - 1
+            if gi < 0 or gi >= var_path.grid_ns.size:
                 continue
             vps = var_path.var_per_s[gi]
             if not np.isfinite(vps) or vps <= 0:
@@ -1044,6 +1052,10 @@ def settlement_z2_test(
             mom = settlement_moments(log_y, tau, sigma, observed_log_sum=0.0, n_observed=0, window=window)
             if mom.var <= 0:
                 continue
+            # Jensen approx (REV-035 caveat 3): the numerator uses ln(arithmetic mean of prices)
+            # while settlement_moments models the mean of log-prices. The within-60 s-window gap is
+            # ~3e-7 in log units vs an a-value ~3e-3 at tau=900 (~0.01%) — immaterial here; revisit
+            # only if the real feed settles a true arithmetic $ average AND tau is tiny.
             z = (math.log(a_mean) - log_y) / math.sqrt(mom.var)
             zs.append(z)
             per_day.setdefault(_utc_date(int(t0)), []).append(z * z)
@@ -1083,7 +1095,11 @@ def bm_shape_diagnostic(
 ) -> dict[float, BmShapeRow]:
     """Empirical ``V(τ)/τ`` and ``V_A(τ)/(τ − 2w/3)``; both should be ~flat (≈σ^2) if the BM +
     settlement-averaging model holds. A fixed multiplicative ``c(τ)`` table (fit on training days)
-    is only warranted if these FAIL to be flat within CI. ``w`` = settlement window length."""
+    is only warranted if these FAIL to be flat within CI. ``w`` = settlement window length.
+
+    Origins are read causally: the origin level ``y`` is LOCF-sampled at ``t0`` via
+    :func:`sample_log_prices_on_grid` (last print <= t0), so an off-grid origin carries no
+    look-ahead (unlike a bare ``searchsorted(..., side="left")`` grid lookup — REV-035 caveat 1)."""
     window = window or SettlementWindow()
     w = window.length_s
     origins_ns = np.asarray(origins_ns, dtype=np.int64)
