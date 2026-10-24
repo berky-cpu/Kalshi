@@ -87,6 +87,28 @@ _EVENTS = {"order_created", "order_changed", "order_deleted"}
 RESEED_DELETE_WINDOW_US = 120_000_000  # 120 s, in microseconds (Bitstamp micro units)
 MAX_RECENT_DELETES = 50_000  # hard ceiling (~minutes of deletes even at burst rate); ~a few MB
 
+# PERIODIC FORCED REST RESEED (2026-10-23 lost-delete defect). ``live_orders`` has NO in-band
+# snapshot: the book self-heals ONLY via a REST reseed (apply_snapshot), which until now fired only
+# on a gap/reconnect. A single lost ``order_deleted`` is a WIRE LOSS with no chain break, so gap
+# detection never fires; the traced incident left a stale order (oid=2063684624891906 @ 81945.48,
+# created 2026-10-22) uncleared for 2+ days (0 reseeds on 10-23/10-24) until BTC fell below its
+# price and the book showed a persistent gross cross. This timer forces a REST reseed every N so a
+# lost-delete stale order is cleared within N — apply_snapshot's clear()+rebuild drops any order
+# absent from the fresh snapshot. N CHOICE = 20 min:
+#   * Self-heal latency: worst-case staleness drops from "indefinite / days" to <= 20 min. A tighter
+#     N (e.g. 5 min) barely improves protection against a rare wire-loss event while tripling REST
+#     load; a looser N (e.g. 60 min) leaves the book poisoned longer. 20 min sits in the suggested
+#     15-30 min band.
+#   * REST overhead: 72 reseeds/day of the group=2 detail order book. The read loop is suspended
+#     only for the ~sub-second fetch, 72x/day — negligible. Bitstamp's public HTTP rate limit is not
+#     recorded as a verified primary figure in docs/feeds.md (UNVERIFIED exact ceiling), but a reseed
+#     every 20 min is orders of magnitude under any plausible per-IP HTTP limit, so N is safe
+#     regardless. This only ADDS reseeds on top of the (rare) gap-triggered ones; the timer resets on
+#     every reseed so a periodic reseed never piles on right after a gap reseed.
+# This is the ONLY venue that sets IoConfig.periodic_reseed_s (the gate): every other BRTI
+# constituent has an in-band or periodic-snapshot feed that self-heals on its own stream.
+PERIODIC_RESEED_S = 20 * 60  # 20 minutes
+
 
 class BitstampProcessor(MessageProcessor):
     venue = "bitstamp"
@@ -293,4 +315,7 @@ def io_config(product: str = "btcusd") -> IoConfig:
         urls=[ENDPOINT],
         subscribe_messages=subscribe_messages(product),
         ping_interval_s=None,  # heartbeat/limits beyond 1024 channels/conn not needed here
+        # Bitstamp-ONLY: force a REST reseed on a timer so a lost ``order_deleted`` (no chain break,
+        # so gap detection never fires) can't poison the book indefinitely — see PERIODIC_RESEED_S.
+        periodic_reseed_s=PERIODIC_RESEED_S,
     )
