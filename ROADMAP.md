@@ -280,8 +280,13 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
   mid-stream; cross-wired/malformed snapshots are skipped+logged, not crashed. **161 tests pass.** Live
   per-venue REST JSON shape is exercised by the 1.3 VPS run (`run_recorder` persist wiring is `# pragma: no cover`).
 - [ ] **2.2** BRTI replica from constituent books per `docs/brti-spec.md`.
-  *Accept:* tracking error vs. published settlement values reported (median, p95, max);
-  target p95 < $5 on settlement averages.
+  *Accept (RE-TARGETED — [ADR-002](docs/decisions/ADR-002-replica-role-and-metric.md), 2026-10-24):*
+  the original "tracking p95 < $5" is RETIRED. The published BRTI is now observed directly (the
+  `kalshi-cfbenchmarks` feed), so the replica is a lead-signal/fallback/backtest-reconstruction tool,
+  not the fair-value level source. New acceptance: replica/feed-induced **fair-value error in cents per
+  (τ, |z|) bucket** vs the Kalshi half-spread (a "safe-to-quote" region), with the real gate =
+  **incremental Brier vs the Kalshi mid** (Phase 3, walk-forward, ≥3–5 independent days). $-tracking
+  (median/p95/bias/slope b/ρ₁) kept as a diagnostic. See ADR-002 for the full rationale + EXP-003/005.
   *Build done 2026-10-17 (result still open):* `src/kbtc/index/` replicates the full CF v17.0 pipeline
   (consolidate → cap `C_T` = trimmed mean + 5σ → uncross → PV curves → utilized depth `D=0.5%` →
   depth-weighted mid with **λ = 1/(0.3·v_T)** → §5.3 deviation filter, 5%→2.5% hysteresis). All §6
