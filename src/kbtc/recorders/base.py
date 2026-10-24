@@ -178,6 +178,57 @@ class DataStalenessMonitor:
 
 
 # --------------------------------------------------------------------------------------
+# Periodic forced reseed — the self-heal for a lost-delete stale order on a venue that has
+# NO in-band snapshot and can therefore go a long time with no reseed (Bitstamp live_orders).
+# --------------------------------------------------------------------------------------
+@dataclass
+class PeriodicReseedTimer:
+    """Decide when to FORCE a REST reseed on a timer, independent of gap detection.
+
+    The 2026-10-23 defect: Bitstamp ``live_orders`` has no in-band snapshot — the book self-heals
+    ONLY via a REST reseed (``apply_snapshot``), which until now fired only on a gap/reconnect. A
+    single lost ``order_deleted`` (a wire loss, no chain break) left a stale order resting; because
+    no reseed fired for 2+ days, the book stayed poisoned (eventually a persistent gross cross)
+    indefinitely. A periodic forced reseed bounds that exposure: a lost-delete stale order is
+    cleared within ``interval_s`` because ``apply_snapshot`` rebuilds the book from a fresh REST
+    snapshot that simply omits the dead order.
+
+    This is Bitstamp-ONLY by construction: it is only wired when ``IoConfig.periodic_reseed_s`` is
+    set, and only Bitstamp sets it (every other venue has an in-band / periodic-snapshot feed that
+    self-heals on its own stream — forcing REST reseeds there would be pointless and add load).
+
+    Pure and socket-free (unit-tested like :class:`DataStalenessMonitor`). The ACTUAL reseed is
+    performed by the live read loop (it sets ``needs_resnapshot`` so the fetch+apply runs inline,
+    preserving the "reads suspended during the REST fetch" invariant the Bitstamp floor/resurrection
+    guards depend on); this class only owns the WHEN. The clock is reset on EVERY reseed — gap OR
+    periodic — via :meth:`on_reseed`, so a periodic reseed never piles on right after a
+    gap-triggered one (no double-reseed race) and the cadence measures time since the last reseed of
+    any kind.
+    """
+
+    interval_s: float | None
+    last_reseed_ns: int = 0
+
+    def on_reseed(self, now_ns: int) -> None:
+        """Mark that a reseed (initial, gap, or periodic) just happened — restart the clock.
+
+        Called at connect once the initial seed lands (establishes the baseline) and after every
+        subsequent reseed, so ``due`` measures elapsed time since the most recent reseed.
+        """
+        self.last_reseed_ns = now_ns
+
+    def due(self, now_ns: int) -> bool:
+        """True once ``interval_s`` has elapsed since the last reseed. ``interval_s=None`` disables
+        (never due). Before the first :meth:`on_reseed` there is no baseline, so it is never due
+        (the connect path seeds the baseline before the timer can fire)."""
+        if self.interval_s is None:
+            return False
+        if self.last_reseed_ns <= 0:
+            return False  # no baseline yet — connect seeds it before any periodic reseed
+        return (now_ns - self.last_reseed_ns) >= int(self.interval_s * 1_000_000_000)
+
+
+# --------------------------------------------------------------------------------------
 # Order books.
 # --------------------------------------------------------------------------------------
 class PriceLevelBook:
@@ -629,6 +680,17 @@ class IoConfig:
     ws_ping_interval_s: float | None = 20.0
     ws_ping_timeout_s: float | None = 20.0
     ws_close_timeout_s: float | None = 10.0
+    # Periodic FORCED REST reseed interval (seconds), independent of gap detection — see
+    # base.PeriodicReseedTimer and the 2026-10-23 Bitstamp lost-delete defect. ``None`` DISABLES it
+    # (the default), so EVERY venue is unchanged unless it opts in. Set ONLY for Bitstamp
+    # ``live_orders`` (bitstamp.io_config): a feed with no in-band snapshot whose book self-heals
+    # ONLY via a REST reseed, so a lost ``order_deleted`` (no chain break) would otherwise poison the
+    # book until the next gap/reconnect — which can be days away. Must only be set for a REST-snapshot
+    # venue (``resync_on_connect=True`` resyncer); setting it for an in-band-resubscribe venue would
+    # fire resubscribe frames on a timer (needless, and risks the venue's resubscribe-rate cap). The
+    # periodic reseed reuses the EXISTING gap-reseed path (it just sets ``needs_resnapshot``), so it
+    # inherits Bitstamp's post-snapshot floor + REV-026 resurrection-suppression guards unchanged.
+    periodic_reseed_s: float | None = None
 
 
 async def _force_close_ws(ws: Any, close_timeout_s: float | None) -> None:
@@ -756,6 +818,13 @@ async def run_recorder(  # pragma: no cover - requires a live socket
                 for p in procs:
                     p.last_data_ns = 0  # fresh connection: no data yet
 
+                # Periodic forced-reseed timer (Bitstamp-only; None elsewhere ⇒ task no-ops). The
+                # task below only FLAGS ``needs_resnapshot``; the read loop performs the actual
+                # fetch+apply inline so reads stay suspended during the REST fetch (the invariant the
+                # Bitstamp floor/resurrection guards rely on). Baseline is seeded after the initial
+                # connect reseed, and reset on every reseed in the read loop (no double-reseed race).
+                reseed_timer = PeriodicReseedTimer(config.periodic_reseed_s)
+
                 async def _watchdog() -> None:
                     if config.stale_timeout_s is None:
                         return
@@ -776,15 +845,47 @@ async def run_recorder(  # pragma: no cover - requires a live socket
                             await _force_close_ws(ws, config.ws_close_timeout_s)
                             return
 
+                async def _periodic_reseed() -> None:
+                    # Bitstamp-only forced reseed on a timer (config.periodic_reseed_s). None ⇒ this
+                    # task does nothing for every other venue (the gate). It only sets
+                    # ``needs_resnapshot`` on the book processor(s) — the SAME flag a gap sets — so the
+                    # read loop runs the existing REST fetch+apply_snapshot path inline (reads
+                    # suspended during the fetch). A fresh snapshot that omits a lost-delete stale
+                    # order clears it. A REST failure in that path is handled exactly as the
+                    # gap-reseed's is: run_recorder's outer try reconnects (which itself reseeds), so
+                    # a failed tick never wedges — the next connect re-establishes the book.
+                    if config.periodic_reseed_s is None:
+                        return
+                    check_s = max(1.0, min(config.periodic_reseed_s / 4.0, 60.0))
+                    while True:
+                        await asyncio.sleep(check_s)
+                        if reseed_timer.due(now_ns()):
+                            logger.info(
+                                "recorder %s/%s periodic forced reseed (every %.0fs) — clears a "
+                                "lost-delete stale order a gap can't detect",
+                                config.venue, config.channel, config.periodic_reseed_s,
+                                extra={"event": "periodic_reseed", "venue": config.venue,
+                                       "channel": config.channel,
+                                       "interval_s": config.periodic_reseed_s},
+                            )
+                            for p in procs:
+                                if p.resync_on_gap:  # book processors only (same gate as connect)
+                                    p.needs_resnapshot = True
+                            # Advance the clock now so the task doesn't re-flag every check tick; the
+                            # read loop also resets it when the reseed actually completes.
+                            reseed_timer.on_reseed(now_ns())
+
                 # F3: create the heartbeat/watchdog and launch the per-connect background tasks
                 # INSIDE the try, so the finally always cancels every task even if the on_connect
                 # hook or the initial resync raises (no leaked tasks on a failed connect).
                 hb = None
                 wd = None
+                pr = None
                 bg_tasks: list = []
                 try:
                     hb = asyncio.create_task(_heartbeat())
                     wd = asyncio.create_task(_watchdog())
+                    pr = asyncio.create_task(_periodic_reseed())
                     # Optional per-connect background tasks (Kalshi dynamic-ticker poller, ROADMAP
                     # 1.3): ``on_connect(send, procs, stop_event) -> list[task]`` gets the
                     # connection-bound ``_send`` so it can push frames (e.g. ``update_subscription``)
@@ -800,6 +901,9 @@ async def run_recorder(  # pragma: no cover - requires a live socket
                         for p in procs:
                             if p.resync_on_gap:
                                 await resnapshot(p)
+                    # Seed the periodic-reseed baseline AFTER the initial seed so the first forced
+                    # reseed is a full ``periodic_reseed_s`` out (no-op when the timer is disabled).
+                    reseed_timer.on_reseed(now_ns())
                     async for raw in ws:
                         recv = now_ns()  # stamp BEFORE parsing (CLAUDE.md convention)
                         writer.write(raw, recv_ts_ns=recv)  # write once, untouched
@@ -816,6 +920,9 @@ async def run_recorder(  # pragma: no cover - requires a live socket
                             if p.needs_resnapshot:
                                 p.clear_resnapshot()
                                 await resnapshot(p)
+                                # Reset the periodic clock on EVERY reseed (gap or periodic) so a
+                                # timed reseed never piles on right after a gap-triggered one.
+                                reseed_timer.on_reseed(now_ns())
                         if stop_event is not None and stop_event.is_set():
                             break
                 finally:
@@ -823,6 +930,8 @@ async def run_recorder(  # pragma: no cover - requires a live socket
                         hb.cancel()
                     if wd is not None:
                         wd.cancel()
+                    if pr is not None:
+                        pr.cancel()
                     for t in bg_tasks:
                         t.cancel()
         except Exception as exc:  # noqa: BLE001 - reconnect on any socket/protocol error
