@@ -286,14 +286,28 @@ This independently corroborates the 0.1 up/down ≥-mechanic. `settlement.py` en
   `avg_60s_data` (trailing 60 s, always present) and — **only in the final minute before
   :00/:15/:30/:45** — `last_60s_windowed_average_15min` {`value` 8dp, `window_size`→60,
   `window_start_ts_ms`, `window_end_ts_exclusive`}, the window `(close-60s, close]` (60 samples).
-  This is the **forming settlement average** observable live, now recorded by the
-  `kalshi-cfbenchmarks` feed (`src/kbtc/recorders/kalshi_cfbenchmarks.py`; writer path
-  `kalshi/cfbenchmarks`). Full schema + source table in `docs/feeds.md` §5E.
-- **UNVERIFIED (F-19):** whether KXBTC15M settles off EXACTLY `last_60s_windowed_average_15min`.
-  The field IS the 60 s close-window average on the wire, but its identity as the authoritative
-  settlement value and the exact endpoint placement remain the open 0.1/0.3 question — to be closed
-  by contract-terms wording + regressing this recorded field vs published `expiration_value`
-  settlements (now directly capturable).
+  `last_60s_windowed_average_15min` is a live *forming* indicator during the final minute but is
+  **one 1-second sample STALE vs the actual settlement** (see F-19 below — settlement = `avg_60s_data`
+  at the close frame, NOT this field). Both are recorded verbatim by the `kalshi-cfbenchmarks` feed
+  (`src/kbtc/recorders/kalshi_cfbenchmarks.py`; writer path `kalshi/cfbenchmarks`). Full schema +
+  source table in `docs/feeds.md` §5E.
+- **F-19 — SETTLEMENT IDENTITY (VERIFIED-PRELIMINARY 2026-10-24, N=3 exact):** KXBTC15M
+  `expiration_value` == the feed's 60×1 s BRTI simple average rounded half-up to 2dp — confirmed
+  **3/3 exact to the cent** on the first three feed-covered closes (16:00/16:15/16:30 UTC 2026-10-24).
+  **⚠ CRITICAL FIELD CORRECTION:** the settlement is **`msg.avg_60s_data.value`** taken from the frame
+  whose embedded print `data.time == close_ms` (window `(close−59s, close]`, 60 prints incl. the close
+  tick) — **NOT `last_60s_windowed_average_15min`**, which matched **0/3** (deltas −0.12/−0.43/+0.67).
+  Reason (traced, not guessed): `last_60s_windowed_average_15min` is sampled left-inclusive/right-
+  exclusive (includes close−60s, OMITS the close tick) → it is exactly **one 1-second sample STALE**;
+  verified `last_60s_windowed_average_15min@close == avg_60s_data@(close+1s)` for all 3. So
+  `last_60s_windowed_average_15min` is a real-time *forming* indicator during the final minute, **not**
+  the settlement value — any settlement/strike consumer MUST read `avg_60s_data` at the close frame.
+  **Consequence:** we can read the exact settlement/strike off the published feed → ADR-001's
+  "strike = replica estimate" caveat can retire (pending the fuller confirmation below).
+  **Still to do before fully closing F-19 / amending ADR-001:** N=3 is one ~35-min session/one vol
+  regime, only offsets :00/:15/:30 seen; re-run across a day+ (100+ closes, all four offsets, calm+vol)
+  + check the rounding mode on a half-cent case. Source: F-19 analysis 2026-10-24, scripts
+  `notes/_f19_scripts/` (uncommitted).
 - **UNVERIFIED (F-18):** `avg_60s_data.window_size` observed **0** on normal 1 Hz frames despite a
   non-trivial average; recorded verbatim, not interpreted.
 
