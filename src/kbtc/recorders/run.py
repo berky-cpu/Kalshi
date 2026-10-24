@@ -55,6 +55,7 @@ from . import (
     cryptocom,
     gemini,
     kalshi,
+    kalshi_cfbenchmarks,
     kraken,
 )
 from . import kalshi_dynamic
@@ -391,6 +392,46 @@ def _build_kalshi(name: str, env: Mapping[str, str], root: str, *,
     return BuiltFeed(name, "kalshi", "market", cfg, [proc], rb, root)
 
 
+def _build_kalshi_cfbenchmarks(name: str, env: Mapping[str, str], root: str, *,
+                               signer_factory: SignerFactory | None = None,
+                               **_: Any) -> BuiltFeed:
+    """Market-data READS of the Kalshi-relayed CF Benchmarks index-value streams (BRTI); NO order
+    path (CLAUDE.md rule 1).
+
+    ISOLATION: a SEPARATE feed / systemd instance (``kbtc-recorder@kalshi-cfbenchmarks``) with its
+    own connection + writer path (``kalshi/cfbenchmarks``), so the index feed and the
+    market/orderbook recorder (``kalshi/market``) cannot take each other down. Reuses the SAME
+    Kalshi auth (header_factory) + the ``msg``-wrapper/seq machinery.
+
+    Subscribes to BOTH channels (``cfbenchmarks_value`` 1 Hz + ``cfbenchmarks_value_5hz`` 5 Hz) for
+    BRTI on the one connection. Overridable via env for a one-off: ``KBTC_CFB_INDEX_IDS`` /
+    ``KBTC_CFB_CHANNELS`` (comma-separated); defaults are BRTI + both channels.
+    """
+    idx_env = env.get("KBTC_CFB_INDEX_IDS")
+    index_ids = tuple(s.strip() for s in idx_env.split(",") if s.strip()) if idx_env else None
+    chan_env = env.get("KBTC_CFB_CHANNELS")
+    channels = tuple(c.strip() for c in chan_env.split(",") if c.strip()) if chan_env else None
+
+    header_factory = make_kalshi_header_factory(env, signer_factory=signer_factory)
+    proc = kalshi_cfbenchmarks.KalshiCfbenchmarksProcessor()
+
+    cfg = kalshi_cfbenchmarks.io_config(index_ids=index_ids, channels=channels)
+    cfg.stale_timeout_s = KALSHI_STALE_TIMEOUT_S  # 300 s, same quiet-tolerance as the market feed
+    cfg.header_factory = header_factory
+
+    subs = kalshi_cfbenchmarks.subscribe_messages(index_ids, channels)
+
+    def subscribe_factory() -> list[dict]:
+        # Drop stale per-channel sids / seq anchors from any previous connection before re-subscribing
+        # (the processor instance is reused across reconnects).
+        proc.reset_subscriptions()
+        return subs
+
+    cfg.subscribe_factory = subscribe_factory
+    rb = resync_mod.kalshi_cfbenchmarks_resync_builder(index_ids, channels)
+    return BuiltFeed(name, "kalshi", "cfbenchmarks", cfg, [proc], rb, root)
+
+
 @dataclass(frozen=True)
 class FeedDef:
     name: str
@@ -454,6 +495,12 @@ FEEDS: dict[str, FeedDef] = {
         "kalshi",
         ("KALSHI_API_KEY_ID", "KALSHI_PRIVATE_KEY_PATH"),
         lambda env, root, **kw: _build_kalshi("kalshi", env, root, **kw),
+    ),
+    "kalshi-cfbenchmarks": FeedDef(
+        "kalshi-cfbenchmarks",
+        ("KALSHI_API_KEY_ID", "KALSHI_PRIVATE_KEY_PATH"),  # same auth as the kalshi market feed
+        lambda env, root, **kw: _build_kalshi_cfbenchmarks(
+            "kalshi-cfbenchmarks", env, root, **kw),
     ),
 }
 

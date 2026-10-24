@@ -87,6 +87,8 @@ from .coinbase_advanced import CoinbaseAdvancedProcessor
 from .cryptocom import CryptoComL2Processor
 from .gemini import GeminiL2Processor
 from .kalshi import KalshiProcessor
+from .kalshi_cfbenchmarks import VALUE_TYPES as _CFB_VALUE_TYPES
+from .kalshi_cfbenchmarks import KalshiCfbenchmarksProcessor
 from .kraken import KrakenProcessor
 from .writer import read_records
 
@@ -160,6 +162,10 @@ def make_processor(venue: str, channel: str) -> tuple[MessageProcessor | None, P
             return BybitPublicTradeProcessor(channel=channel), None
         return BybitOrderbookProcessor(channel=channel), None  # in-band snapshot reset
     if v == "kalshi":
+        if c.startswith("cfbenchmarks"):
+            # The index-value pass-through feed — its own seq-gap machinery (no book). Safe in the
+            # normalize stream_kalshi path too: cfbenchmarks types never hit the orderbook branch.
+            return KalshiCfbenchmarksProcessor(channel=channel), None
         return KalshiProcessor(channel=channel), None  # in-band orderbook_snapshot
     return None, None
 
@@ -206,6 +212,11 @@ def is_batch_dataset(venue: str, channel: str) -> bool:
 _KALSHI_DATA_TYPES = {
     "orderbook_snapshot", "orderbook_delta", "trade",
     "market_lifecycle", "market_lifecycle_v2", "market_lifecycle_update",
+    # CF Benchmarks index-value streams (the kalshi-cfbenchmarks feed): a value frame is DATA; the
+    # ``subscribed`` ack / heartbeats are not (so the staleness watchdog + health gate are correct).
+    # The classifier is venue-keyed and the orderbook feed never carries these types, so unioning
+    # them here is safe for both kalshi feeds.
+    *_CFB_VALUE_TYPES,
 }
 
 

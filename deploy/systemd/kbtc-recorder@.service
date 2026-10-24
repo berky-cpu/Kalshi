@@ -6,8 +6,13 @@
 #   systemctl enable --now kbtc-recorder@binance-perp
 #   systemctl enable --now kbtc-recorder@bybit-perp
 #   systemctl enable --now kbtc-recorder@kalshi
+#   systemctl enable --now kbtc-recorder@kalshi-cfbenchmarks   # CF BRTI index value (1Hz+5Hz)
 #
 # %i is the feed name passed straight to `python -m kbtc.recorders.run <feed>`.
+# NOTE: kalshi-cfbenchmarks is a SEPARATE instance from kalshi (its own connection + writer path
+# kalshi/cfbenchmarks), isolated so the index feed and the market/orderbook recorder can't take
+# each other down. Same auth (KALSHI_API_KEY_ID + KALSHI_PRIVATE_KEY_PATH). It is a SECOND
+# concurrent authed WS per key (within Kalshi's 5-concurrent cap).
 # READS ONLY: this records market data; there is NO order path in the runner (CLAUDE.md rule 1).
 [Unit]
 Description=kbtc market-data recorder (%i)
