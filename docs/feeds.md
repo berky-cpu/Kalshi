@@ -703,6 +703,56 @@ official sample 2026-10-21 + live wire 2026-10-21 BOTH boxes). **PARTIAL/UNVERIF
 
 ---
 
+## 5E. Kalshi-relayed **CF Benchmarks index value** (BRTI) — `cfbenchmarks_value` (1 Hz) + `cfbenchmarks_value_5hz` (5 Hz)
+
+**The highest-value datum for KXBTC15M fair value: the *published* CF BRTI index AND the *forming
+settlement average*, straight from Kalshi's relay of the CF feed.** Recorded by a SEPARATE feed /
+systemd instance (`kbtc-recorder@kalshi-cfbenchmarks`, writer path `kalshi/cfbenchmarks`) with its
+own connection, ISOLATED from the market/orderbook recorder (`kalshi/market`) so neither can take
+the other down. Reads only; reuses the Kalshi handshake auth (RSA-PSS/Ed25519) and the SAME
+`msg`-wrapper + per-sid seq-gap machinery as §(Kalshi orderbook). Pass-through: no book — every
+`msg` is persisted verbatim for calibration + the settlement-identity check.
+
+**Status:** WIRE-VERIFIED by a read-only authed prod probe (our key, 2026-10-24) + primary doc
+`https://docs.kalshi.com/websockets/cfbenchmarks-value` (read 2026-10-24).
+
+- **Endpoint (VERIFIED):** `wss://external-api-ws.kalshi.com/trade-api/ws/v2` (ENDPOINT_PROD — the
+  SAME host as the orderbook recorder). Concurrent authed connections per key work fine (independent
+  per-connection `sid`); confirmed NOT to disturb the live market recorder.
+- **Auth (VERIFIED):** identical to the Kalshi orderbook feed — handshake `KALSHI-ACCESS-KEY` /
+  `-SIGNATURE` / `-TIMESTAMP` from `KALSHI_API_KEY_ID` + the private key at
+  `KALSHI_PRIVATE_KEY_PATH` (`/etc/kbtc/kalshi-private-key.pem`). No entitlement wall observed.
+- **Subscribe (VERIFIED):** `{"id":N,"cmd":"subscribe","params":{"channels":[<chan>],"index_ids":["BRTI"]}}`
+  — the key is **`index_ids`** (NOT `market_tickers`). Immediate `subscribed` ack per channel, each
+  with its own `sid`. We send ONE subscribe per channel (so each channel's ack/sid is unambiguous
+  for per-sid seq tracking), both on the one connection.
+- **Both channels recorded on one connection:** `cfbenchmarks_value` (1 Hz, carries the averages)
+  and `cfbenchmarks_value_5hz` (5 Hz, raw ticks for lead-signal research).
+- **Envelope (VERIFIED):** top-level `type` (= the channel name), `sid` (int), `seq` (int, starts 1,
+  +1/frame per sid — gap-detection field), `sending_ts_ms`; payload NESTED under **`msg`**.
+- **`cfbenchmarks_value` `msg` (VERIFIED):** `index_id` ("BRTI"), `received_at` (unix ms), `data`
+  (raw CF frame as a JSON **string**: `{"type":"value","time":<ms>,"id":"BRTI","value":"<2dp>"}`),
+  `avg_60s_data` {`value` 8dp str, `window_size`, `window_start_ts_ms`, `window_end_ts_exclusive`}
+  (trailing 60 s, ALWAYS present — `window_size` observed **0** on normal frames, recorded as-is,
+  NOT interpreted; see F-18), and `last_60s_windowed_average_15min` (same four fields, `window_size`
+  → 60) present ONLY in the final minute before :00/:15/:30/:45 — **the forming settlement average**,
+  window `(close-60s, close]`, 60 samples.
+- **`cfbenchmarks_value_5hz` `msg` (VERIFIED):** `index_id`, `value_usd` (8dp str), `source_ts_ms`,
+  `received_at`, `data`. No averages.
+- **Gap detection / resync:** per-sid `seq` jump = a gap (logged, never silent) → resubscribe
+  (`resync.kalshi_cfbenchmarks_resync_builder`). Unlike the orderbook (resync DISABLED pending the
+  sid-pruning double-count hazard), these are VALUE streams with no book: a gap is just missed
+  prints and a resubscribe re-opens the stream with nothing to double-apply. Raw of every frame is
+  persisted regardless. **OPEN RISK (benign, UNVERIFIED):** a resubscribe that opened a new `sid`
+  while the old stayed alive would briefly double-RECEIVE frames (inflated volume, no corruption;
+  deduplicable offline by `source_ts_ms`); self-heals on reconnect.
+- **Health/liveness:** a value frame classifies as DATA (`health._is_data_kalshi` extended to
+  `cfbenchmarks_value`/`_5hz`); the `subscribed` ack / heartbeats do not. Liveness threshold inherits
+  the Kalshi 420 s (watchdog 300 s). Replay gaps counted via `KalshiCfbenchmarksProcessor`
+  (`health.make_processor` routes the `cfbenchmarks` channel to it).
+- **Normalize:** DEFERRED — raw capture only for now (the frames are self-describing by top-level
+  `type`; a minimal pass-through parquet split can be added later without re-recording).
+
 ## 6. Cross-venue summary table
 
 | Venue | BRTI? | Endpoint (prod) | Auth | Gap-detection field | Snapshot / resync | Status |
@@ -740,6 +790,9 @@ official sample 2026-10-21 + live wire 2026-10-21 BOTH boxes). **PARTIAL/UNVERIF
 | F-15 | **Bullish L2 is snapshot-only on the wire.** The docs say "an initial snapshot followed by incremental updates," but BTCUSD L2 emitted ONLY `type:"snapshot"` full books (43/43 per box) over the probe. Each snapshot carries a `sequenceNumberRange` and chains `first == prev.last+1` (42/42 both boxes). The processor's hot path (full-snapshot replace + seq-chain gap logging) is VERIFIED; it self-heals (no resync) on a snapshot-path gap. | VERIFIED (snapshot path) | — (the snapshot path is the observed contract; the update path is F-16). |
 | F-16 | **Bullish `type:"update"` incremental path UNVERIFIED.** Documented (generic envelope `type:"update"`, same `V1TALevel2` dataType) but NEVER observed on the wire for BTCUSD L2. The adapter handles it defensively as an absolute-SET per level (`qty "0"` removes) with seq-chain gap→resync, tagged UNVERIFIED. **Consume-gate (not a recording gate):** if updates ever appear AND the book is depth-capped, an evicted level could ghost (REV-029 F1 class) — verify the update semantics + removal signaling and whether evicted levels are removed before admitting the update path to the BRTI replica. Safe to RECORD as-is (raw is complete; fix is reconstruction-side). | PARTIAL / UNVERIFIED | A longer capture that elicits `type:"update"` frames, or a Bullish doc section spelling out the L2 update delta semantics + removal signaling. |
 | F-17 | **Bullish connection / message-rate / subscription limits not recorded**, and published L2 snapshot depth + snapshot cadence not characterized. The 5-min idle-close and `keepalivePing`/pong ARE verified (doc + wire). | PARTIAL | Read the Bullish WS connection-limits section; measure snapshot cadence + depth over a longer capture. |
+| F-18 | **CF Benchmarks `cfbenchmarks_value` `avg_60s_data.window_size == 0` on normal frames.** Observed 0 on ordinary 1 Hz frames even though `avg_60s_data` carries a non-trivial 8dp average (the doc says it counts prior ticks in the trailing window). Recorded verbatim, NOT interpreted. Does NOT affect the `last_60s_windowed_average_15min` field (which correctly reports `window_size` up to 60). | PARTIAL (not load-bearing for recording) | A longer capture characterizing when/whether `window_size` becomes non-zero, or a Kalshi/CF note on the field's semantics. |
+| F-19 | **Whether KXBTC15M settles off EXACTLY `last_60s_windowed_average_15min`.** The field IS the forming 60 s close-window average on the wire, but its identity as the authoritative settlement value (and the exact window-endpoint placement) is still the open 0.1/0.3 question — must be closed by contract-terms wording + empirically regressing this field vs published `expiration_value` settlements. | UNVERIFIED | Contract-terms cross-check + an empirical regression of the recorded `last_60s_windowed_average_15min` vs published settlements (now capturable with this recorder). |
+| F-20 | **CF Benchmarks WS connection / subscription / message-rate limits not recorded**, and whether a resubscribe opens a new `sid` (the benign double-receive risk in §5E). The 5-concurrent-WS-per-user cap (orderbook docs) presumably applies — the index feed is a SECOND concurrent connection alongside the market recorder. | PARTIAL | Read a CF/Kalshi WS-limits section; observe resubscribe `sid` behaviour on the wire over a longer capture. |
 
 ---
 
@@ -775,4 +828,6 @@ official sample 2026-10-21 + live wire 2026-10-21 BOTH boxes). **PARTIAL/UNVERIF
 | Bullish — official api-examples multi-orderbook sample (`l2Orderbook` topic, endpoint path, keepalive cadence) | `https://github.com/bullish-exchange/api-examples/blob/master/websocket/multi_orderbook_web_socket.py` | read 2026-10-21 | VERIFIED — `topic:"l2Orderbook"`, `HOST_NAME + "/trading-api/v1/market-data/orderbook"`, keepalivePing every 300 s |
 | Bullish — public REST markets (BTCUSD spot `marketId`/`marketType`) | `https://api.exchange.bullish.com/trading-api/v1/markets` | read 2026-10-21 | VERIFIED — `BTCUSD` = `marketId 10000`, `marketType SPOT`, base BTC/quote USD, tickSize 0.1 |
 | Bullish — **live read-only wire probe** (both boxes, BTCUSD `l2Orderbook`): snapshot-only + seq chain + keepalive pong | `wss://api.exchange.bullish.com/trading-api/v1/market-data/orderbook` (public; connect→subscribe→~45 frames→disconnect) | captured 2026-10-21 (Ashburn-US + EU) | VERIFIED — 43/43 frames `type:"snapshot"` `dataType:"V1TALevel2"`, `data` object with flat `bids`/`asks`; `sequenceNumberRange` chain `first==prev.last+1` 42/42 both boxes; `keepalivePing`→"Keep alive pong"; reachable from BOTH boxes |
+| Kalshi — **CF Benchmarks index value** (`cfbenchmarks_value` + `cfbenchmarks_value_5hz`, BRTI) | `https://docs.kalshi.com/websockets/cfbenchmarks-value` | read 2026-10-24 | VERIFIED — channel `cfbenchmarks_value` (+ `_5hz`); subscribe `{channels,index_ids:["BRTI"]}`; envelope `type`/`sid`/`seq`/`sending_ts_ms` with payload under `msg`; `msg` = `index_id`/`received_at`/`data`(raw CF JSON string)/`avg_60s_data`(always)/`last_60s_windowed_average_15min`(final minute pre-:00/:15/:30/:45 only); 5hz `msg` = `index_id`/`value_usd`/`source_ts_ms`/`received_at`/`data`, no averages |
+| Kalshi — **live authed CF Benchmarks WS probe** (prod, our key, BRTI, 2026-10-24): reachability + schema + no entitlement wall | live wire (authed; reads only) | captured 2026-10-24 | VERIFIED — both channels delivered on a concurrent authed connection (independent `sid`s; did NOT disturb the live market recorder); payload NESTED under `msg`; `seq` per-sid +1; `avg_60s_data` always present (`window_size` observed 0 on normal frames, F-18); `last_60s_windowed_average_15min` seen only in the final pre-close minute (`window_size` up to 60) |
 | Kalshi — **live authed update_subscription** (box, KXBTC15M, 2026-10-17): dynamic ticker mgmt (ROADMAP 1.3) | live wire (authed; reads only) | validated 2026-10-17 | VERIFIED on the wire — subscribe `orderbook_delta`→sid=1, `trade`→sid=2; `update_subscription get_snapshot` on sid=1 re-emitted an `orderbook_snapshot` for the market (seq re-anchored); `update_subscription add_markets [next window]` on sid=1 returned `{"type":"ok","id":1001,"msg":{"market_tickers":[...both...]}}` and emitted an `orderbook_snapshot` for the ADDED market on the SAME sid=1 (an `initialized` market returns an empty 0-level snapshot — so the next window can be pre-added before open). **No error-26/27.** No reconnect. All snapshots stayed on the orderbook sid. The `update_subscription` ack type is `ok` (not `subscribed`) — no new sid is created, so sids are captured only from the initial `subscribed` acks |
