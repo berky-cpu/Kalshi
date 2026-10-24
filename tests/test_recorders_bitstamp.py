@@ -4,11 +4,15 @@ from conftest import load_fixture
 
 import logging
 
+from kbtc.recorders.base import PeriodicReseedTimer
 from kbtc.recorders.bitstamp import (
     MAX_RECENT_DELETES,
+    PERIODIC_RESEED_S,
     RESEED_DELETE_WINDOW_US,
     BitstampProcessor,
 )
+
+S = 1_000_000_000  # ns per second
 
 
 def _evt(event, eid, pre, oid, otype, price, amount, micro):
@@ -236,6 +240,88 @@ def test_guard_disable_paths_are_counted_and_warned(caplog):
     assert p.snapshots_without_floor == 1
     assert "60" in p.book.orders and "61" in p.book.orders  # guard skipped -> all rows re-added
     assert any("no microtimestamp/timestamp floor" in r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------------------
+# Periodic forced reseed (2026-10-23 lost-delete defect). ``live_orders`` has NO in-band snapshot,
+# so the book self-heals ONLY via a REST reseed. A lost ``order_deleted`` is a wire loss with NO
+# chain break, so gap detection never fires; the traced incident left a stale order resting for 2+
+# days (no reseed fired) until BTC fell below its price and the book showed a persistent gross cross.
+# A timer-forced reseed clears it: apply_snapshot's clear()+rebuild drops any order absent from the
+# fresh snapshot. (This is NOT the REV-026 resurrection class — there is no delete to key on and no
+# stale-snapshot lag involved; the dead order is simply gone from the next snapshot.)
+# ---------------------------------------------------------------------------------------
+def test_periodic_reseed_clears_lost_delete_stale_order():
+    """Reproduce the exact defect: order created, its ``order_deleted`` NEVER transmitted (wire
+    loss), no gap detected → the order rests forever and crosses once BTC falls below its price. A
+    periodic forced reseed (timer due) runs apply_snapshot with a fresh snapshot that OMITS the dead
+    order → it is cleared and the book is uncrossed."""
+    p = BitstampProcessor(product="btcusd")
+    # Initial seed: the stale order is resting (bid at 81945.48, the traced oid), book consistent.
+    stale_oid = "2063684624891906"
+    p.apply_snapshot({
+        "microtimestamp": "1000000",
+        "bids": [[ "81945.48", "0.5", stale_oid], ["81900.00", "1.0", "10"]],
+        "asks": [["81950.00", "1.0", "20"]],
+    })
+    assert stale_oid in p.book.orders
+
+    # Live stream over the next period: BTC falls. The ask side drops BELOW the stale bid 81945.48,
+    # which would cross — but there is NO delete for the stale order (the delete was lost on the
+    # wire), and no chain break, so no gap/resync is ever triggered.
+    p.process(_evt("order_created", "e1", None, 21, 1, "81940.00", "1.0", micro=1_000_100), 2)
+    assert p.needs_resnapshot is False  # nothing detected this as a problem — that's the defect
+    assert p.book.best_bid() == Decimal("81945.48")  # stale bid now ABOVE the new ask → crossed
+    assert p.book.best_ask() == Decimal("81940.00")
+    assert p.book.best_bid() > p.book.best_ask()  # POISONED: gross cross, undetectable in-band
+
+    # ---- Periodic forced reseed fires (timer due) ----
+    timer = PeriodicReseedTimer(interval_s=PERIODIC_RESEED_S)
+    t0 = 1000 * S
+    timer.on_reseed(t0)  # baseline at connect
+    assert timer.due(t0 + PERIODIC_RESEED_S * S) is True  # a full interval later → the loop reseeds
+    # The loop's action when due: it would set needs_resnapshot and run apply_snapshot inline. The
+    # fresh REST snapshot simply OMITS the long-dead order (only the real resting book is returned).
+    p.apply_snapshot({
+        "microtimestamp": "2000000",
+        "bids": [["81900.00", "1.0", "10"]],
+        "asks": [["81940.00", "1.0", "21"]],
+    })
+
+    assert stale_oid not in p.book.orders  # the lost-delete stale order is gone
+    assert p.book.best_bid() == Decimal("81900.00")
+    assert p.book.best_ask() == Decimal("81940.00")
+    assert p.book.best_bid() < p.book.best_ask()  # UNCROSSED — self-healed
+    assert p.resurrections_suppressed == 0  # no resurrection involved — pure clear()+rebuild
+
+
+def test_periodic_reseed_path_still_honours_rev026_suppression():
+    """A periodic reseed reuses the SAME apply_snapshot path as a gap reseed, so the REV-026
+    resurrection guard still protects it: a snapshot order with a recorded delete at micro >= S (the
+    lagging-REST-snapshot case) is STILL suppressed on a periodic reseed, so a slightly-lagging
+    periodic snapshot can never reintroduce resurrection."""
+    p = BitstampProcessor(product="btcusd")
+    p.apply_snapshot({"bids": [], "asks": []})
+
+    # A normal create+delete on the live stream (delete micro 3000).
+    p.process(_evt("order_created", "c1", "c0", 888, 0, "102.00", "0.5", micro=2000), 1)
+    p.process(_evt("order_deleted", "c2", "c1", 888, 0, "102.00", "0.5", micro=3000), 2)
+    assert "888" not in p.book.orders
+
+    # Periodic reseed is due; its REST snapshot lags (micro S=2500 < delete 3000) and still lists 888.
+    timer = PeriodicReseedTimer(interval_s=PERIODIC_RESEED_S)
+    t0 = 1000 * S
+    timer.on_reseed(t0)
+    assert timer.due(t0 + PERIODIC_RESEED_S * S) is True
+    p.apply_snapshot({
+        "microtimestamp": "2500",
+        "bids": [["102.00", "0.5", "888"], ["100.00", "1.0", "10"]],
+        "asks": [["101.00", "1.0", "20"]],
+    })
+
+    assert "888" not in p.book.orders  # REV-026 guard fired on the periodic path too
+    assert p.resurrections_suppressed == 1
+    assert p.book.best_bid() < p.book.best_ask()  # UNCROSSED
 
 
 def test_hard_cap_bounds_map_under_microtimestamp_regression():
