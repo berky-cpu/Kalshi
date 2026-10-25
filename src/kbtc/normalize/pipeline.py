@@ -353,6 +353,193 @@ def stream_kalshi(channel: str, records: Iterable[Record]) -> Iterator[tuple[str
                                        snap_id, synced, side, lvl, price, size))
 
 
+# ---------------------------------------------------------------------------------------
+# Kalshi TOP-OF-BOOK extractor (day-7 fix for the slow full-depth _kalshi_levels path).
+#
+# Motivation. The Brier harness (``kbtc.signals.brier.KalshiBookSeries``) only ever reads the BEST
+# yes bid and BEST no bid as-of its ~per-10 s origins; it discards the deep book. The full-depth
+# ``stream_kalshi`` path sorts ALL ~100-200 price levels on EVERY ``orderbook_delta`` (O(M log M))
+# and emits every level, which is pathologically slow at multi-day scale (>78 min for ONE hour).
+#
+# This path reuses the SAME ``KalshiProcessor`` apply logic (O(1) plain-dict deltas — the live
+# recorder's book class is untouched) but tracks each side's BEST price INCREMENTALLY: a side's max
+# is only recomputed when a delta REMOVES (or is at/above) the current best; a delta strictly BELOW
+# the best touches nothing and costs O(1). It emits SLIM level-0 ``kalshi_books`` rows (exact same
+# schema ``KalshiBookSeries.from_rows`` reads) — one top-of-book row per side per TOB change — so
+# the harness reads the output UNCHANGED. ~O(N) total instead of O(N·M).
+#
+# This is NORMALIZE/offline only; the 24/7 recorder (``KalshiProcessor._apply_delta``) is not
+# touched and the full-depth ``stream_kalshi`` / ``_kalshi_levels`` remain available off the hot path.
+# ---------------------------------------------------------------------------------------
+def _kalshi_body(msg: Any) -> dict:
+    """Event payload fields, robust to the UNVERIFIED ``msg``-wrapper (1.1b): nested under ``msg``
+    if a dict is there, else the top-level object. Mirrors recorders.kalshi._event_body."""
+    if not isinstance(msg, dict):
+        return {}
+    inner = msg.get("msg")
+    return inner if isinstance(inner, dict) else msg
+
+
+def _side_best(level_dict: dict, cur_best: Any, touched_price: Any) -> Any:
+    """New best (max) price for one side after a delta touched ``touched_price``.
+
+    The processor keeps ``level_dict`` with ONLY positive sizes (it pops levels that reach <= 0), so
+    the best is simply ``max(level_dict)``. We avoid recomputing that on every delta:
+
+    * ``touched_price`` still present and strictly ABOVE the old best → it IS the new best (O(1)).
+    * present and at/below the old best → best unchanged (O(1)); a strictly-below add never moves
+      the top, so NO recompute (the hot-path win).
+    * absent (removed) and strictly below the old best → a non-best level went away → best
+      unchanged, NO recompute.
+    * absent and at/above the old best → the CURRENT BEST was removed → recompute ``max`` (O(M) on
+      THAT side only, only on a best-removal).
+
+    ``cur_best is None`` (empty side) falls through to the recompute branch, which returns the new
+    max or ``None`` if the side is now empty.
+    """
+    if touched_price in level_dict:
+        if cur_best is None or touched_price > cur_best:
+            return touched_price
+        return cur_best
+    if cur_best is not None and touched_price < cur_best:
+        return cur_best
+    return max(level_dict) if level_dict else None
+
+
+def _tob_fingerprint(best: dict, book: dict) -> tuple:
+    """O(1) hashable TOB state ``(yes_price, yes_size, no_price, no_size)`` to suppress no-op emits.
+
+    Reading the size for each side's best price from the plain dict is O(1); a dropped/duplicate
+    delta (book unchanged) therefore produces an identical fingerprint and is NOT re-emitted.
+    """
+    out: list[Any] = []
+    for side in ("yes", "no"):
+        bp = best.get(side)
+        size = book.get(side, {}).get(bp) if bp is not None else None
+        out.append(str(bp) if bp is not None else None)
+        out.append(str(size) if size is not None else None)
+    return tuple(out)
+
+
+def normalize_kalshi_tob(channel: str, records: Iterable[Record],
+                         *, sample_every_ns: int | None = None) -> NormalizeResult:
+    """Buffered top-of-book Kalshi normalize (see :func:`stream_kalshi_tob`); for tests/small slices."""
+    report = kalshi_report(channel)
+    res = NormalizeResult(checkpoint=report)
+    for kind, row in stream_kalshi_tob(channel, records, sample_every_ns=sample_every_ns):
+        (res.books if kind == BOOK else res.trades).append(row)
+    return res
+
+
+def stream_kalshi_tob(channel: str, records: Iterable[Record],
+                      *, sample_every_ns: int | None = None) -> Iterator[tuple[str, dict]]:
+    """Streaming TOP-OF-BOOK Kalshi normalize: yield slim level-0 ``kalshi_books`` rows + trades.
+
+    Replays raw ``kalshi/market`` through the SAME ``KalshiProcessor`` apply logic (O(1) dict
+    deltas), tracks each side's best INCREMENTALLY (:func:`_side_best`), and on each TOB change emits
+    BOTH sides' current best under ONE ``snap_id`` as ``level == 0`` rows. Emitting both sides per
+    snap is REQUIRED: ``KalshiBookSeries.from_rows`` groups by ``snap_id`` and reads ``best_yes`` and
+    ``best_no`` from the SAME group, so a one-sided snap would yield no mid.
+
+    ``sample_every_ns`` (optional) throttles emission to at most one TOB snap per cadence per ticker
+    (still only on an actual change). Default ``None`` = emit on every change (exact as-of; the
+    harness samples with its own grid). Rows match the ``kalshi_books`` schema EXACTLY, so the Brier
+    harness consumes this output unchanged.
+
+    ``synced`` handling mirrors :func:`stream_kalshi` (per-ticker baseline from ``orderbook_snapshot``,
+    flagged False from a seq-gap until re-anchored). The full-depth :func:`stream_kalshi` and
+    ``_kalshi_levels`` remain available; this path only replaces the hot deep-book sort/emit.
+    """
+    from kbtc.recorders.kalshi import _dec
+
+    proc, _ = make_processor("kalshi", channel)
+    if proc is None:  # pragma: no cover
+        return
+
+    snap_id = 0
+    last_fp: dict[str, tuple] = {}
+    last_emit_ns: dict[str, int] = {}
+    tob_best: dict[str, dict[str, Any]] = {}
+    baseline: dict[str, bool] = {}
+    pending: dict[str, bool] = {}
+
+    for recv, raw in records:
+        msg = as_dict(raw)
+
+        for t in extract.trade_rows("kalshi", channel, raw):
+            t["recv_ts_ns"] = recv
+            yield (TRADE, t)
+
+        proc.process(raw, recv)
+
+        typ = msg.get("type") if isinstance(msg, dict) else None
+        if typ not in {"orderbook_snapshot", "orderbook_delta"}:
+            continue
+        body = _kalshi_body(msg)
+        ticker = body.get("market_ticker", proc.product)
+
+        if typ == "orderbook_snapshot":
+            baseline[ticker] = True
+            pending[ticker] = False
+        if proc.needs_resnapshot:
+            pending[ticker] = True
+            proc.clear_resnapshot()
+        synced = baseline.get(ticker, False) and not pending.get(ticker, False)
+
+        book = proc.books.get(ticker, {})
+        best = tob_best.setdefault(ticker, {"yes": None, "no": None})
+
+        if typ == "orderbook_snapshot":
+            # One recompute per snapshot (O(M) once) re-anchors both sides' best.
+            for side in ("yes", "no"):
+                lv = book.get(side)
+                best[side] = max(lv) if lv else None
+        else:  # orderbook_delta
+            side = body.get("side")
+            if side in ("yes", "no"):
+                try:
+                    price = _dec(body["price_dollars"])
+                except (KeyError, ValueError):
+                    price = None
+                if price is not None:
+                    best[side] = _side_best(book.get(side, {}), best[side], price)
+
+        fp = _tob_fingerprint(best, book)
+        if fp == last_fp.get(ticker):
+            continue  # no TOB change (incl. dropped/duplicate deltas): nothing to emit
+        if sample_every_ns is not None:
+            le = last_emit_ns.get(ticker)
+            if le is not None and (recv - le) < sample_every_ns:
+                continue  # throttled; leave last_fp so the next change is still detected
+        rows = _kalshi_tob_rows(best, book, recv, ticker, channel, snap_id + 1, synced)
+        last_fp[ticker] = fp
+        if rows:
+            snap_id += 1
+            last_emit_ns[ticker] = recv
+            for r in rows:
+                yield (BOOK, r)
+
+
+def _kalshi_tob_rows(best: dict, book: dict, recv: int, ticker: str, channel: str,
+                     snap_id: int, synced: bool) -> list[dict]:
+    """The current top-of-book as level-0 ``kalshi_books`` rows (one per present side, shared snap_id).
+
+    Price (Decimal, dollars) is preserved at the boundary — no ``Decimal(str)`` round-trip; the size
+    is read directly from the processor's dict. A side with no best, or a best whose size is
+    non-positive, is omitted (an absent side == no quote, exactly as the harness treats it)."""
+    rows: list[dict] = []
+    for side in ("yes", "no"):
+        bp = best.get(side)
+        if bp is None:
+            continue
+        size = book.get(side, {}).get(bp)
+        if size is None or size <= 0:
+            continue
+        rows.append(_book_row(recv, None, "kalshi", ticker, channel, snap_id, synced, side, 0,
+                              bp, size))
+    return rows
+
+
 def _kalshi_levels(book: dict) -> list[tuple[str, int, Decimal, Decimal]]:
     """Each side's price→size map → best-first (price descending) ``(side, level, price, size)``.
 

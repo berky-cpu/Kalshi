@@ -36,7 +36,7 @@ CHUNK_ROWS = 50_000
 
 
 def _process_feed(root: str, out: str, venue: str, channel: str, levels: int,
-                  date: str | None) -> ckpt.CheckpointReport | None:
+                  date: str | None, kalshi_top_of_book: bool = False) -> ckpt.CheckpointReport | None:
     files = writer.gather_feed_files(root, venue, channel, date)
     if not files:
         return None
@@ -51,7 +51,13 @@ def _process_feed(root: str, out: str, venue: str, channel: str, levels: int,
 
     if venue == "kalshi":
         report = pipeline.kalshi_report(channel)
-        stream = pipeline.stream_kalshi(channel, _records(files))
+        # Day-7 fast path: the Brier harness only needs best yes/no, so by default (for the
+        # orderbook ``market`` channel) emit SLIM top-of-book rows via the incremental extractor —
+        # multi-day in minutes, not hours. ``--kalshi-full-depth`` restores the full-depth emit.
+        if kalshi_top_of_book and not channel.lower().startswith("cfbenchmarks"):
+            stream = pipeline.stream_kalshi_tob(channel, _records(files))
+        else:
+            stream = pipeline.stream_kalshi(channel, _records(files))
         books_ds = schema.DS_KALSHI_BOOKS
         book_schema = schema.KALSHI_BOOK_SCHEMA
     else:
@@ -118,6 +124,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", default="data/clean", help="clean output root (default: data/clean)")
     p.add_argument("--date", default=None, help="restrict to a single UTC date YYYY-MM-DD")
     p.add_argument("--levels", type=int, default=10, help="top-N L2 levels per side (default: 10)")
+    p.add_argument("--kalshi-full-depth", action="store_true",
+                   help="emit the full Kalshi order book (slow). Default: slim top-of-book only "
+                        "(best yes/no), which is all the Brier harness reads (day-7 fast path).")
     args = p.parse_args(argv)
 
     if not Path(args.root).exists():
@@ -126,7 +135,8 @@ def main(argv: list[str] | None = None) -> int:
 
     reports: list[ckpt.CheckpointReport] = []
     for venue, channel in discover_feeds(args.root):
-        rep = _process_feed(args.root, args.out, venue, channel, args.levels, args.date)
+        rep = _process_feed(args.root, args.out, venue, channel, args.levels, args.date,
+                            kalshi_top_of_book=not args.kalshi_full_depth)
         if rep is not None:
             reports.append(rep)
 
