@@ -1,5 +1,15 @@
 # Roadmap
 
+> **PROJECT CONCLUDED — NEGATIVE FINDING (2026-10-29, [ADR-004](docs/decisions/ADR-004-conclude-negative.md)).**
+> A maker with public-feed information has no viable passive edge on KXBTC15M. EMPIRICAL: the
+> realistic back-of-queue naive policy loses (−9¢/fill, every day negative; EXP-009, red-team PASS).
+> STRUCTURAL: a selective/defended variant is argued (not proven) to be ≈0±0.1¢ — below statistical
+> resolvability and economically nil — on a 1¢-tick, no-rebate, efficient book where we are the slow
+> side. Phases 3.3 / further-4.2 / Phase-5 edge-hunting are **closed**. The deliverable is the
+> reviewed reproducible pipeline + the honest negative. Optional belt-and-suspenders (not blocking):
+> the ≥7-day literal 4.2 re-run and the frictionless reconciliation / ceiling tests. See ADR-004 for
+> scope and what would reopen the thesis.
+
 Each item lists an owner agent and acceptance criteria. Tick an item only when the
 criteria are met, tests pass, and `red-team-reviewer` has signed off (link the review).
 
