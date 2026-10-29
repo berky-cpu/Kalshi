@@ -32,10 +32,14 @@ gets ~1/13 of the passive fills P0d counted, and those are the adversely-selecte
 the front of the queue mainly inside informative sweeps.
 
 ## Robustness — the negative is NOT a queue/markout artifact (red-team-verified)
-- **Even the frictionless front-of-queue upper bound is net-negative:** mean5s **−1.34¢** (median
-  −0.05¢, 49% positive). So there is **no positive edge even in the best case**; realistic
-  back-of-queue amplifies it ~4–5×. **Headline should rest on "no edge even frictionless," not on the
-  −9¢ magnitude** (which is queue-amplified).
+- **Frictionless front-of-queue upper bound:** mean5s −1.34¢ — **BUT this mean is driven by 2 of 42
+  markets** (median −0.05¢, 49% positive). **CAVEAT (Fable, 2026-10-29):** this −1.34¢ **disagrees in
+  sign with P0d's frictionless +0.2–0.6¢** (387 markets, settlement horizon). The disagreement is not
+  yet resolved (candidates: stride-10 2-market domination; 5s vs settlement horizon; rest-at-touch vs
+  deep-book passive fills). **So "no edge even frictionless" is NOT yet established** — it must be
+  reconciled by running EXP-009 frictionless on ALL markets at both horizons (part of the ≥7-day
+  re-run). The back-of-queue negative (−9¢, all days, all CIs<0) is solid; the frictionless-ceiling
+  sign is OPEN.
 - **Quiet vs volatile split (frictionless, per market):** the 5 QUIET markets are marginally
   **+0.05 to +0.33¢** (a front-of-queue maker captures ~half-spread when not run over); the 2
   VOLATILE windows are deeply negative even frictionless (−5.26¢, −4.49¢). The net loss concentrates
