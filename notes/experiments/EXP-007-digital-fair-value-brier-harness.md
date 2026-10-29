@@ -1,9 +1,12 @@
 # EXP-007: KXBTC15M digital fair value + Brier-vs-Kalshi-mid harness (ROADMAP 3.2)
 
 - **Date / author (agent):** 2026-10-24 / quant-modeler (lead-delegated).
+  Day-7 run + results appended 2026-10-28.
 - **Status:** model + harness BUILT & TESTED; evaluation protocol FIXED below **before** any
-  result. The Brier NUMBER is a later box run on accumulated data (first pass = PRELIMINARY).
-  ROADMAP 3.2 stays UNTICKED (acceptance = beats-mid OOS on >=3-5 independent held-out days).
+  result. **Day-7 run executed on the published CF feed (not the replica) — red-team PASSED;
+  verdict STOP-AND-RETHINK (see "Day-7 run" section).** ROADMAP 3.2 stays UNTICKED; per
+  [ADR-003](../../docs/decisions/ADR-003-maker-economic-gate.md) the beats-the-mid gate is retired
+  in favour of FV non-inferiority + a Phase-4.2 economic (markout) gate.
 
 ## Hypothesis
 
@@ -106,6 +109,43 @@ Report the gate line, per-bucket Brier diff, and the reliability plot back here,
    quote). A locked book (zero spread) is kept. `skip_crossed=False` keeps the raw mid and discloses
    it instead.
 5. **Few, autocorrelated days + single-market σ warmup** — PRELIMINARY, not a verdict.
+
+## Day-7 run (2026-10-28) — RESULTS (red-team PASSED; PRELIMINARY, 5 CF-feed days)
+
+Run on the **published CF BRTI feed** (the ADR-002 primary source; now 5 days recorded) rather than
+the replica — a better level source than this note originally anticipated. Live Kalshi mid
+reconstructed as-of each origin. Headline gate: τ≥60 s, in-window excluded, drift OFF, 5 held-out
+CF-feed days (3 full: 10-25/26/27; 10-24 and 10-28 partial), n≈23,922 origins.
+
+**VERDICT: STOP-AND-RETHINK — the fair value does NOT beat the live mid OOS.**
+- Paired Brier-diff (model − mid) = **+0.00288**, per-day block-bootstrap 95% CI `[~0, +0.0058]`
+  (model marginally worse). Log-loss diff +0.0083 `[+0.00002, +0.0178]`. Model well-calibrated
+  (reliability tracks the mid's). Worse 4/5 days; robust to dropping the worst day.
+- Shortfall concentrates **ATM in the last 1–3 min** ([60,180)×|z|<1 ⇒ Brier +0.020..0.026); long-τ
+  and off-money buckets flat (±0.002). Mechanism: a ~2 s index-lead error amplified by binary delta
+  (matches EXP-005), **not** a drift deficiency and **not** a regime a maker quotes in.
+
+**Critical benchmark bug (CONFIRMED by red-team).** The first pass printed a spurious "Model BEATS
+the mid" (−0.0824). Root cause: the day-7 Kalshi TOB normalizer (commit 80e5d3a) computes `synced`
+from a **per-market** sequence-gap check, but Kalshi shares **one seq across all markets** on a
+subscription, so `synced` false-trips ~32 s after each market opens and the default
+`require_synced=True` **freezes the reconstructed mid ~14 min stale**. The model was "beating" a
+frozen mid. With `require_synced=False` the mid is live/correct → the STOP verdict above. The book
+*data* is correct regardless; only the `synced` annotation is wrong. No raw re-recording needed; the
+fix (per-sid seq / rename the column / standardize consumers on live semantics) is filed separately.
+
+**P0a/P0b measurement (2026-10-28, pre-red-team), decisive for the gate reframe:**
+- **P0a — safe-to-quote region is essentially EMPTY.** Kalshi quotes at the 1¢ tick (often 0.1¢
+  sub-cent, verified on 2.94M book states) across the live window; FV cents-error bound (√dBrier×100)
+  is 3–16¢ for all |z|<2 — no spread cushion. |z|<1 stays unsafe to ≥180 s; |z|<0.5 further.
+- **P0b — disagreement is anti-informative.** |FV−mid|>3¢ ⇒ model clearly worse (dBrier +0.0098, CI
+  > 0). Wide-spread "we are the mid" regime absent (n ≤ 1).
+- **Implication → [ADR-003](../../docs/decisions/ADR-003-maker-economic-gate.md):** on this tight
+  market the edge cannot come from FV accuracy; FV acceptance becomes non-inferiority, and the
+  pass/fail economic gate moves to Phase-4.2 fill-conditional markouts (spread − adverse selection).
+
+Artifacts (box root@5.161.236.203): `/var/tmp/kbtc_scratch/{run_brier_day7.py,results_day7_live.log,
+run_p0_day7.py,results_p0_day7.log}`; clean parquet `/var/tmp/kbtc_clean_day7/`.
 
 ## Red-team review
 
