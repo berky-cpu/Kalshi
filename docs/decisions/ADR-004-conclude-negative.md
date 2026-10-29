@@ -72,3 +72,19 @@ The claim is asserted at two levels of strength, kept deliberately distinct:
 A genuine **sub-second lead feed** (co-located constituent/perp data — turns us from the slow side to
 a fast one), a **maker rebate / fee change**, or a **different contract with structurally wider
 spreads**. Absent one of those, the structural argument stands.
+
+## Addendum (2026-10-29): post-conclusion opportunity scan — both candidates failed
+After concluding, a Fable-led scan of the 2026 landscape surfaced two cheap-to-test candidates; both
+were tested (free, no infra) and **both failed**, so the negative stands and the project is closed:
+- **Kalshi LIP (maker subsidy):** units pinned (`period_reward`/10,000 = USD; the "$1,455/day"
+  reading refuted); realistic solo payout ~**$14/day median per market**, pro-rata/crowded, expires
+  2027-01-01, and **no crypto series is in any LIP** (doesn't cover our contract). Not worth an infra
+  re-spin. (facts.md "LIP" section.)
+- **NO-side single-name/mention markets** (Bartlett & O'Hara +1.91¢ claim): reproduced frictionless
+  (+1.95¢) but **KILL** under honest back-of-queue fills (−3.2¢/contract, −4.9¢ recent),
+  concentration criterion fired, regime shifted against it (YES-settle 31%→41–46%); red-team PASS
+  confirmed not a false negative. (EXP-010.)
+
+**Infrastructure:** both Hetzner VPS **deleted** 2026-10-29 (billing stopped; confirmed unreachable
+with local connectivity verified); all raw data archived + verified in B2; repo pushed to GitHub.
+The reviewed pipeline + this honest negative are the deliverable.
