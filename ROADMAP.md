@@ -334,17 +334,32 @@ criteria are met, tests pass, and `red-team-reviewer` has signed off (link the r
 ## Phase 3 — Fair value + signals (owner: quant-modeler)
 
 - [ ] **3.1** Realized-vol estimator (microstructure-robust EWMA on 1–5 s returns, intraday
-  seasonality). *Accept:* out-of-sample QLIKE vs. naive baseline.
+  seasonality). *Accept:* out-of-sample QLIKE vs. naive baseline. **Built + code-reviewed (c0adc0a);
+  acceptance BLOCKED on CF-feed length** — needs ≥7 feed-days / ≥5 held-out (z²-covers-1 at τ=300,900
+  + QLIKE model/trailing<1 majority + κ̂ day-range<15%); feed hits 7 days ~Oct 30–31. Run then.
 - [ ] **3.2** Fair value = `pricing.digital_up_probability` with live σ and window state.
-  *Accept:* calibration plot + Brier score vs. Kalshi mid on held-out days.
-  **Key test:** does the model beat Kalshi's own mid out of sample? If not, stop and rethink.
+  *Accept (RE-TARGETED — [ADR-003](docs/decisions/ADR-003-maker-economic-gate.md), 2026-10-29):*
+  the "beat the mid OOS" key test is **RETIRED** as a gate (unpassable by construction on thin data,
+  and the wrong bar for a maker). Acceptance = **non-inferiority to the mid in the quote region** +
+  per-(τ,|z|) cents-error bound vs the observed half-spread. **Day-7 run (EXP-007, red-team PASS,
+  PRELIMINARY):** well-calibrated, ties-to-slightly-worse than the live mid (paired Brier-diff
+  +0.00288, CI `[~0,+0.0058]`); shortfall is ATM in the last 1–3 min only (a ~2 s index-lead error).
+  P0a/P0b: the book is 1¢/0.1¢-tick everywhere tradeable, FV error 3–16¢ ⇒ **no FV-accuracy edge**;
+  economic verdict deferred to 4.2. Re-run under the non-inferiority bar at ≥7 CF-feed days (~Oct 30).
 - [ ] **3.3** Short-horizon drift from OFI/TFI (L3, with cancellation filtering) and perp lead.
-  *Accept:* incremental Brier improvement on walk-forward splits.
+  *Accept:* incremental Brier improvement (nested over the current FV) on walk-forward splits.
+  **SHELVED to day ≥14 (ADR-003)** — the day-7 miss is a ~2 s index *lead* error (binary-delta
+  amplified), not minute-horizon flow; the near-term object is a ≤2-param index lead-nowcast in an
+  adverse-selection-defense role, pending the P0c lead-attribution regression. Crypto OFI/TFI only if
+  P0c leaves residual (OFI predictive power decays in seconds).
 
 ## Phase 4 — Backtester (owner: backtest-engineer)
 
 - [ ] **4.1** Event-driven simulator over recorded Kalshi books: back-of-queue fill model,
   queue depletion from observed trades/cancels, latency parameter, exact fees.
+  **IN PROGRESS (approved 2026-10-29, ADR-003)** — promoted to the critical path: since the day-7
+  measurement shows no FV-accuracy edge on this 1¢-tick market, the queue/fee/adverse-selection
+  economics this sim measures are now the *whole* question, not a confirmation step.
 - [ ] **4.2** Quoting policy from `quoting.py` + pull rules (jump guard, near-strike endgame,
   thin depth). *Accept:* markouts at 5 s / 30 s / settlement, P&L net of fees, inventory
   stats, per-day breakdown; sensitivity to latency and queue assumptions.
