@@ -113,6 +113,51 @@ def _erfinv(x: float) -> float:
 
 
 @dataclass
+class RestAtTouchPolicy:
+    """The ADR-003 first-gate maker policy: rest ``size`` at the current best bid on EACH side
+    (join the touch), with the pull rules — NOT a tuned strategy.
+
+    This tests whether rest-at-touch spread capture survives back-of-queue position + latency, so it
+    deliberately does NOT use the fair value to set prices (it joins the observed touch). The fair
+    value is used ONLY to evaluate the pull region:
+
+    * No-quote region (ADR-003 §5, widened to the P0a data): within ``pull_tau_s`` (default 180 s) of
+      close AND ``|z| < pull_z`` (default 1.0) — the unsafe near-strike endgame — quote NOTHING.
+    * ``z`` is recovered EXACTLY from the model ``fair_prob_up`` via the inverse normal CDF
+      (``prob_up == Phi(z)``), so no separate z plumbing is needed. If the model fair value is
+      unavailable (no index/sigma as-of t) we CONSERVATIVELY pull inside ``pull_tau_s`` (we cannot
+      confirm the touch is safe) and quote normally outside it.
+
+    One-sided touches are quoted on whichever side exists. Marketable guard: we only join the touch
+    (resting), never cross, so these are always maker intents.
+    """
+
+    size: Decimal = Decimal(1)
+    pull_tau_s: float = 180.0
+    pull_z: float = 1.0
+
+    def _z(self, prob_up: float | None) -> float | None:
+        if prob_up is None:
+            return None
+        from statistics import NormalDist
+        p = min(max(prob_up, 1e-12), 1 - 1e-12)
+        return NormalDist().inv_cdf(p)
+
+    def quotes(self, state: MarketState) -> list[QuoteIntent]:
+        z = self._z(state.fair_prob_up)
+        if state.tau_s < self.pull_tau_s:
+            # Near the close: pull if near the strike (|z| small), or if we can't evaluate z.
+            if z is None or abs(z) < self.pull_z:
+                return []
+        out: list[QuoteIntent] = []
+        if state.best_yes_price is not None:
+            out.append(QuoteIntent(side="yes", price=state.best_yes_price, size=self.size))
+        if state.best_no_price is not None:
+            out.append(QuoteIntent(side="no", price=state.best_no_price, size=self.size))
+        return out
+
+
+@dataclass
 class FixedQuotePolicy:
     """Deterministic test/diagnostic policy: always wants the given intents (independent of state).
 
