@@ -119,6 +119,28 @@ def test_trade_through_mode_requires_through_trade():
     assert res.fills[0].ts_ns == T0 + 200_000_000
 
 
+def test_frictionless_mode_captures_at_level_trade_ignoring_queue():
+    # FRICTIONLESS fills the passive side of an at-level trade regardless of queue ahead.
+    cfg = BacktestConfig(submit_latency_ns=10_000_000, fill_mode=FillMode.FRICTIONLESS)
+    records = [
+        (T0, snap()),  # yes@0.40 has queue 100 ahead
+        (T0 + 100_000_000, trade("no", "0.40", "0.60", "3.00", 2)),  # only 3 lots trade
+    ]
+    res = run_backtest(market(), FixedPolicy(BUY_YES), records, config=cfg)
+    # QUEUE mode would NOT fill (3 < queue 100); FRICTIONLESS fills min(3,10)=3.
+    assert res.fill_count == 1 and res.fills[0].size == D("3")
+
+
+def test_queue_mode_same_trade_does_not_fill_behind_queue():
+    cfg = BacktestConfig(submit_latency_ns=10_000_000, fill_mode=FillMode.QUEUE)
+    records = [
+        (T0, snap()),
+        (T0 + 100_000_000, trade("no", "0.40", "0.60", "3.00", 2)),
+    ]
+    res = run_backtest(market(), FixedPolicy(BUY_YES), records, config=cfg)
+    assert res.fill_count == 0  # 3 < queue 100
+
+
 def test_queue_mode_through_trade_also_fills():
     cfg = BacktestConfig(submit_latency_ns=10_000_000, fill_mode=FillMode.QUEUE)
     records = [

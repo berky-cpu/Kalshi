@@ -9,7 +9,7 @@ from kbtc.backtest.report import (
     MarketOutcome,
     StudyReport,
     bootstrap_pnl_ci,
-    daily_pnl_t_interval,
+    day_block_bootstrap_mean,
     daily_pnl_totals,
     sensitivity_table,
     summarize_market,
@@ -91,9 +91,19 @@ def test_bootstrap_ci_is_day_level_and_brackets_point():
     assert mlo <= mpoint <= mhi
 
 
-def test_daily_t_interval_over_daily_totals():
-    mean, lo, hi = daily_pnl_t_interval(_multiday_outcomes())
-    assert abs(mean - 7.0) < 1e-9 and lo < mean < hi
+def test_day_block_bootstrap_mean_pools_and_brackets():
+    # 4 days; within-day per-fill values. Pooled mean over all values is the point estimate.
+    vbd = {"d1": [1.0, 1.0], "d2": [2.0], "d3": [3.0, 3.0, 3.0], "d4": [0.0]}
+    point, n, lo, hi = day_block_bootstrap_mean(vbd, n_boot=2000, seed=3)
+    all_vals = [1, 1, 2, 3, 3, 3, 0]
+    assert n == len(all_vals)
+    assert abs(point - sum(all_vals) / len(all_vals)) < 1e-9
+    assert lo <= point <= hi
+
+
+def test_day_block_bootstrap_empty():
+    point, n, lo, hi = day_block_bootstrap_mean({})
+    assert n == 0 and point != point  # NaN
 
 
 def test_bootstrap_handles_no_settled_markets():
