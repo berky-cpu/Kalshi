@@ -107,8 +107,8 @@ def bootstrap_pnl_ci(outcomes: Sequence[MarketOutcome], *, n_boot: int = 5000,
     ``statistic`` is ``"total"`` (sum over days) or ``"mean"`` (mean daily P&L). Returns
     ``(point, lo, hi)`` at the ``1-alpha`` level. Days with no settled market are dropped.
 
-    For a small number of days a ``daily_pnl_t_interval`` on the daily totals is the more honest
-    companion (reported alongside, not instead).
+    For a small number of days the day-level block bootstrap is the sole primary interval; a
+    normal-approximation t-interval was removed as misleading on few days.
     """
     import numpy as np
 
@@ -131,27 +131,35 @@ def bootstrap_pnl_ci(outcomes: Sequence[MarketOutcome], *, n_boot: int = 5000,
     return (point, lo, hi)
 
 
-def daily_pnl_t_interval(outcomes: Sequence[MarketOutcome], *, alpha: float = 0.05
-                         ) -> tuple[float, float, float]:
-    """Student-t CI for the MEAN daily P&L over the independent daily totals.
+def day_block_bootstrap_mean(values_by_day: dict[str, Sequence[float]], *, n_boot: int = 5000,
+                             alpha: float = 0.05, seed: int = 0) -> tuple[float, int, float, float]:
+    """Day-level block bootstrap of the POOLED MEAN of per-item values (the markout gate statistic).
 
-    The honest small-sample companion to the day-level bootstrap when only a handful of days exist.
-    Returns ``(mean_daily, lo, hi)``; NaN interval if < 2 days.
+    ``values_by_day`` maps day -> the per-fill (or per-item) values observed that day. Resamples whole
+    DAYS with replacement (the independent block; markouts within a day share the BTC path), pools the
+    resampled days' values, and takes the mean. Returns ``(point_mean, n_values, lo, hi)`` at the
+    ``1-alpha`` level. The point estimate is the pooled mean over all real days.
+
+    (A per-item/iid bootstrap would under-cover; this is the SEV-2-correct block for the gate.)
     """
     import numpy as np
-    from statistics import NormalDist
 
-    totals = np.asarray([p for _, p in daily_pnl_totals(outcomes)], dtype=float)
-    n = totals.size
-    if n == 0:
-        return (float("nan"), float("nan"), float("nan"))
-    mean = float(totals.mean())
-    if n < 2:
-        return (mean, float("nan"), float("nan"))
-    se = float(totals.std(ddof=1)) / (n ** 0.5)
-    # Normal-approx critical value (avoids a scipy dep); documented as approximate for small n.
-    crit = NormalDist().inv_cdf(1 - alpha / 2)
-    return (mean, mean - crit * se, mean + crit * se)
+    days = [d for d, v in values_by_day.items() if len(v) > 0]
+    if not days:
+        return (float("nan"), 0, float("nan"), float("nan"))
+    arrays = {d: np.asarray(values_by_day[d], dtype=float) for d in days}
+    all_vals = np.concatenate(list(arrays.values()))
+    point = float(all_vals.mean())
+    rng = np.random.default_rng(seed)
+    keys = list(arrays.keys())
+    boot = np.empty(n_boot, dtype=float)
+    for b in range(n_boot):
+        pick = rng.integers(0, len(keys), len(keys))
+        pooled = np.concatenate([arrays[keys[k]] for k in pick])
+        boot[b] = pooled.mean()
+    lo = float(np.quantile(boot, alpha / 2))
+    hi = float(np.quantile(boot, 1 - alpha / 2))
+    return (point, int(all_vals.size), lo, hi)
 
 
 # ---------------------------------------------------------------------------------------

@@ -192,6 +192,9 @@ class _Engine:
             if cp == o.price:  # trade AT our level
                 if self.cfg.fill_mode is FillMode.QUEUE:
                     fe = apply_trade_at_level(o, t.size, t.recv_ts_ns)
+                elif self.cfg.fill_mode is FillMode.FRICTIONLESS:
+                    o.queue_ahead = ZERO  # always at the front: capture the passive side
+                    fe = apply_trade_at_level(o, t.size, t.recv_ts_ns)
                 # TRADE_THROUGH: same-price trades never fill (handled below only on a through).
             elif cp < o.price:  # trade THROUGH us (worse price): our level fully cleared
                 fe = apply_trade_through(o, t.recv_ts_ns)

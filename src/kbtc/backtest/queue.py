@@ -34,6 +34,9 @@ ZERO = Decimal(0)
 class FillMode(str, Enum):
     QUEUE = "queue"  # fill when queue-ahead hits zero and a trade crosses (default)
     TRADE_THROUGH = "trade_through"  # fill ONLY on a trade through our price (most conservative)
+    FRICTIONLESS = "frictionless"  # queue_ahead treated as 0: we are ALWAYS the passive side at our
+    # price (the P0d frictionless benchmark). NOT a realistic mode — used only to count the
+    # upper-bound fills so the queue-mode capture fraction can be measured against it.
 
 
 class CancelPolicy(str, Enum):
