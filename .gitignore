@@ -11,6 +11,9 @@ data/
 *.jsonl.zst
 .claude/settings.local.json
 
+# Candidate-2 (single-name/mention adverse-selection study) local data dumps — do not commit.
+notes/_candidate2/
+
 # Deploy secrets: real VPS secrets live in /etc/kbtc (outside the repo). These patterns are
 # belt-and-suspenders in case anything secret is ever created inside the tree. The committed
 # TEMPLATE deploy/env.example (no leading dot, not named .env.*) stays tracked.

@@ -311,6 +311,50 @@ This independently corroborates the 0.1 up/down ≥-mechanic. `settlement.py` en
 - **UNVERIFIED (F-18):** `avg_60s_data.window_size` observed **0** on normal 1 Hz frames despite a
   non-trivial average; recorded verbatim, not interpreted.
 
+## Liquidity Incentive Program (LIP) — units, economics, eligibility (infra-gate study)
+
+Decision-gating study of whether LIP is worth a later infra re-spin. Resolved the `period_reward`
+units ambiguity against primary sources. **Bottom line: `period_reward` is denominated in
+units of $0.0001 (centicents); Liquidity Reward (dollars, whole Time Period) = `period_reward` / 10,000.**
+Realistic solo payout is TENS of $/day per market (median ~$14.29/day pool, shared pro-rata) —
+the "$1,455/day" figure came from the wrong cents denomination and is **refuted** (it breaches
+the filed cap on ~90% of active markets). No BTC/crypto-core series is in an active LIP.
+
+| Fact | Value | Source (URL) | Verified on | By |
+|---|---|---|---|---|
+| `period_reward` units | **Centicents ($1e-4).** Liquidity Reward (USD, whole Time Period) = `period_reward` / 10,000. **Pinned three ways:** (1) CFTC filing defines "Liquidity Reward" as "a total fixed, per-Eligible Market amount of funds in **U.S. dollars**" bounded "no less than $1 and no greater than $1,000 **per calendar day** ... applied on a **per-market basis**"; (2) help-page worked example uses a "**$100 reward**" and the median API `period_reward` is exactly **1,000,000** → $100.00; (3) across all 6,380 active programs `period_reward/10000/days` ∈ **[$2.86, $550.44]/day**, i.e. 100% inside the filed $1–$1,000/day band with **0 over-cap and 0 under-floor** — the cents reading puts 5,712/6,380 (~90%) OVER the $1,000/day cap (impossible), dollars is absurd. | Live API `GET https://api.elections.kalshi.com/trade-api/v2/incentive_programs` (388,429 programs paged, 2026-10-29); help page `https://help.kalshi.com/incentive-programs/liquidity-incentive-program`; CFTC filing `https://www.cftc.gov/filings/orgrules/rules10142633813.pdf` | 2026-10-29 | data-engineer |
+| Reward formula | `Your reward = (Your Time-Period Score ÷ all participants' scores) × Liquidity Reward × (non-excluded snapshots ÷ total snapshots)`, **rounded DOWN to nearest cent**; min payout **$1.00** (sub-$1 scores pay nothing). Reward is a **shared pool split PRO-RATA by score** — not per-maker. | Help page; CFTC filing Appendix A §6 | 2026-10-29 | data-engineer |
+| Scoring mechanics | Order-book **Snapshot once per second, exact time drawn from a random-uniform** offset within the second. Score requires resting size meeting **Target Size on BOTH yes and no sides** (one-sided = 0 for that snapshot). **Reference Price** = first level (walking from best) where cumulative resting size reaches **1/5 of Target Size**; orders beyond it discounted by **Discount Factor ^ (ticks away)**. Snapshot worth ≤ 2.0 total (yes+no). Snapshots where market closed / two-sided liquidity missing are **excluded** (reduce payout proportionally). | Help page; CFTC filing | 2026-10-29 | data-engineer |
+| API program variables | `target_size_fp` = **1000** contracts (940/1000 sampled; 60 at 2500); `discount_factor_bps` = **5000 → Discount Factor 0.50**; filing floating maxima: Target Size **>100 contracts** (help page: <20,000), Discount Factor **≤1.00**, Time Period **≥1 day, ≤7 days**. `incentive_type` all `"liquidity"`; `incentive_description` `"series_lip"` or blank. | Live API + CFTC filing | 2026-10-29 | data-engineer |
+| Per-market $/day (realistic) | Pool **median $14.29/day**, mean $21.66, range **$2.86–$550.44/day** per market (whole-pool, i.e. what a SOLE qualifying maker could earn). Shared pro-rata → with any pro-MM competition an individual gets a fraction. Requires resting the full Target Size (≥1000 contracts) two-sided, continuously, near Reference Price. | Live API (6,380 active programs, 2026-10-29) | 2026-10-29 | data-engineer |
+| Aggregate $/day ceiling | **~$138,197/day** if a single actor captured 100% of EVERY active market's pool — not realistic (two-sided Target Size in 6,380 markets across 616 series = millions in tied-up capital, and you are never sole maker everywhere). Realistic solo = **tens to low-hundreds of $/day gross** before adverse selection, concentrating on the thinnest/richest least-crowded markets. Richest single series KXRT = $21.3k/day pool over 214 markets (contested). **LIP is marginal/crowded — consistent with the low-payout scenario.** | Live API | 2026-10-29 | data-engineer |
+| Active programs / series | **6,380 active** programs (start ≤ 2026-10-29 ≤ end) across **616 distinct series**. Top by count: KXYTVIEWSHIGH, KXGGWINNER, KXYTVIEWSW, KXRT, KXTRUMPMENTION. **No BTC/crypto-core series** (only tangential KXARCRYPTO/KXIAETHANOL/KXVOTEHEGSETHIMPEACH); **KXBTC15M is NOT in any LIP** → LIP cannot be earned on our target contract. | Live API | 2026-10-29 | data-engineer |
+| Daily cap/floor | **HARD $1–$1,000 per market, per calendar day** ("minimum and maximum ... applied on a per-market basis", "For the avoidance of doubt"). Confirmed empirically: every active program sits inside the band. | CFTC filing | 2026-10-29 | data-engineer |
+| Eligibility (solo individual) | **A plain U.S. individual retail trader QUALIFIES.** Help page: "Most regular U.S. Kalshi members." **Excluded:** Kalshi affiliates/employees; Introducing Brokers, FCMs, and their customers transacting through them; non-U.S. users. **CONFIRMED — MM-agreement exclusion is PER-MARKET:** CFTC filing — "Participants with obligations or benefits in a market under a separate market-making agreement do not receive Liquidity Rewards in **that market**" (not a blanket member ban). A solo with no MM agreement, not an IB/FCM/customer-thereof, not a Kalshi affiliate, is eligible. | Help page + CFTC filing | 2026-10-29 | data-engineer |
+| Program end date | **Expires no later than January 1, 2027** ("the Program expires no later than January 1, 2027"; effective until the earlier of Jan 1 2027 or amendment/termination). Kalshi may end/modify at any time. | Help page + CFTC filing | 2026-10-29 | data-engineer |
+
+### LIP verification notes
+- **Units are NOT genuinely ambiguous after checking** — three independent lines of evidence (filing
+  definition in USD + $1–$1,000/day per-market cap, the $100 help-page example == median `period_reward`
+  1,000,000, and the empirical [$2.86,$550.44]/day band with zero cap/floor violations) all converge on
+  **centicents**. The cents reading is refuted; the dollars reading is absurd. So the units are NOT a
+  reason LIP is "too risky to re-spin infra for"; the LOW PAYOUT is.
+- CFTC filing fetched via `curl` (WebFetch 403'd / wrong-path 404'd; `cftc.gov` serves clean PDF to curl,
+  read with pypdf under `uv run --with pypdf --no-project`). Correct filing URL is
+  `https://www.cftc.gov/filings/orgrules/rules10142633813.pdf` (effective 2026-10-28, amends the Aug-2025 LIP).
+- `paid_out` is a **boolean** (950 active programs True) — no per-program paid-out *amount* is exposed by the
+  API, so the units could not be back-ed out from a realized payout; the cap-band argument above is the
+  definitive substitute.
+- **Minor UNVERIFIED/PARTIAL:** (a) 942 active programs show a 14-day start→end span, which exceeds the
+  filing's "no Time Period may exceed seven (7) days" — likely overlapping Time Periods or a pre-amendment
+  cohort; not load-bearing for the units result (the $/day band holds regardless). (b) Confidential Appendix D
+  (per-subcategory maximum variable values) is FOIA-withheld, so the exact per-series pool-sizing rule is not
+  public. (c) The `period_reward`→dollars /10,000 scale is inferred from the cap band + $100 example, not from
+  an explicit API units field (no units field exists); it is nonetheless pinned beyond reasonable doubt.
+- **Strategic read for kbtc-mm:** LIP pays tens of $/day per market, pro-rata and crowded, on series
+  UNRELATED to KXBTC15M (no crypto-core LIP is active). It does not subsidize our target contract and is not,
+  on these numbers, worth an infra re-spin for this project.
+
 ### Verification notes
 - Ticker-specific values (open/close examples) are from the 2026-10-18 session markets live at fetch
   time (2026-10-16); the structural facts (window, source, tick, 15-min frequency, up/down mechanic)
