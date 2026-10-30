@@ -1,9 +1,15 @@
 # Working-paper outline (draft) — DO adverse-selection premia persist in prediction markets?
 
-**Status:** OUTLINE / skeleton. The headline result (Section 4) is PENDING the hardening run
-(backtest-engineer, 2026-10-29) + red-team. Framing is written to be robust to that outcome; if the
-decay proves to be series-selection rather than a time effect, the lead pivots to the methodology
-(Section 5) and this becomes a methods/practitioner note. Nothing here is a claim until reviewed.
+**Status (UPDATED 2026-10-29): the decay headline is DEAD — pivot fired.** The hardening run found the
+Kalshi "Mentions" universe is **2026-only** (launched ~Jul 2026), so the multi-year time axis the
+decay headline needs does not exist in accessible data; the frictionless premium is **flat** over the
+observable Q3→Q4 2026; and cross-series variation (−10.5¢…+17.6¢) dwarfs any time change — **selection
+dominates, not a time trend.** Bartlett–O'Hara's pre-2026 sample is therefore a *different* universe,
+making the comparison cross-sectional, not temporal. **Section 4 (decay) is retired.** Per the
+pre-committed pivot, the lead becomes the **queue-aware frictions methodology (Section 5)**: a
+replication-then-refutation of the harvestability of the +1.91¢. This is a MODEST methods/practitioner
+note, not a novel empirical paper. Awaiting Berk's decision on whether to write it (short note / blog)
+or shelve. Decay-run detail: see backtest-engineer handback + `notes/_candidate2/result_byperiod.txt`.
 
 **Working title:** *Fading Edges: Decay of the NO-Side Adverse-Selection Premium in Kalshi
 Single-Name Prediction Markets* (alt: "Do Adverse-Selection Premia Persist? …").
