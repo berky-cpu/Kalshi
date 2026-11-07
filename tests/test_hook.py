@@ -34,7 +34,7 @@ def test_blocks_secrets_but_not_example():
     assert run("Read", file_path="/repo/.env") == 2
     assert run("Bash", command="cat .env") == 2
     assert run("Read", file_path="/repo/secrets/kalshi.pem") == 2
-    assert run("Read", file_path="/repo/.env.example") == 0
+    assert run("Read", file_path="/repo/deploy/env.example") == 0
 
 
 def test_allows_normal_work():
