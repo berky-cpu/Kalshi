@@ -50,5 +50,5 @@ contract — facts.md), **both post-conclusion candidates failed → the project
 
 ## Artifacts
 `src/kbtc/backtest/single_name.py` (+ `tests/test_single_name.py`, 12 tests; full suite 565 pass);
-drivers `notes/_candidate2_scripts/{download,study}.py`; outputs `notes/_candidate2/result_*.txt`
+drivers `scripts/experiments/exp010_{download,study}.py`; outputs `notes/_candidate2/result_*.txt`
 (raw data gitignored).

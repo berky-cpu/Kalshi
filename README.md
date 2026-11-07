@@ -59,7 +59,7 @@ python -m kbtc.normalize --root data/raw --out data/clean
 # 3. Analyses — each EXP note lists its exact script, config and split
 #    EXP-002  index replica tracking error        (src/kbtc/index/tracking.py)
 #    EXP-007  fair value vs Kalshi mid, Brier     (notes/experiments/EXP-007-*.md)
-#    EXP-009  queue-aware maker gate              (notes/_bt42_scripts/gate_run.py)
+#    EXP-009  queue-aware maker gate              (scripts/experiments/exp009_gate_run.py)
 ```
 
 Every experiment fixed its evaluation protocol before looking at results, split train/test by

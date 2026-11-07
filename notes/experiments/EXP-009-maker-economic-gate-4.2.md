@@ -72,6 +72,6 @@ position is attainable) would target. Whether that rescues it is the open strate
 - Cosmetic stale docstring in `report.py` fixed.
 
 ## Artifacts
-Driver `notes/_bt42_scripts/gate_run.py`; result JSON (box) `/var/tmp/kbtc_src_day7/gate_stride10.json`.
+Driver `scripts/experiments/exp009_gate_run.py`; result JSON (box) `/var/tmp/kbtc_src_day7/gate_stride10.json`.
 Code: `src/kbtc/backtest/{loader,policy,queue,engine,report,markout,events,feeapply}.py`; tests
 `tests/test_backtest_*.py` (553 suite pass). Red-team: PASS-WITH-CAVEATS (this file's caveats).
