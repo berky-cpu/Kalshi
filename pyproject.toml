@@ -4,7 +4,8 @@ version = "0.1.0"
 description = "Maker-only, model-priced market making research for Kalshi KXBTC15M (paper trading only)"
 readme = "README.md"
 requires-python = ">=3.12"
-authors = [{ name = "Berk" }]
+authors = [{ name = "Berk Yilmaz" }]
+license = "MIT"
 dependencies = [
     "zstandard>=0.23",
     "websockets>=13",
